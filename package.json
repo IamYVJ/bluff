@@ -1,0 +1,14 @@
+{
+  "name": "bluff",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static peer-to-peer web implementation of Bluff (Cheat / I Doubt It).",
+  "scripts": {
+    "test": "node scripts/test-engine.mjs",
+    "stamp": "node scripts/test-engine.mjs --write-stamp",
+    "icons": "node scripts/gen-icons.js",
+    "serve": "python -m http.server 8000"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,72 @@
+# ===========================================================================
+# What git does not carry.
+#
+# THE RULE IS THE LEADING UNDERSCORE: a file or directory named _anything is
+# scratch, and everything without one is the project. Two exceptions are
+# spelled out below and both are directories that predate the rule.
+#
+# The rule is meant to be TOTAL — every file on disk should be either tracked
+# or matched here, with nothing falling between — and there is a one-line
+# check for that at the bottom.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# UNSHIPPED IS NOT THE SAME AS DISPOSABLE. DO NOT BULK-DELETE BY THE PATTERN.
+# ---------------------------------------------------------------------------
+# The underscore says "git does not carry this". It does not say "nobody needs
+# this", and reading it as though it did is the mistake this paragraph exists
+# to prevent. A one-shot probe whose question is now an assertion in
+# scripts/test-engine.mjs is cheap to lose. A sketch that a source comment
+# points at is not — deleting it strands the explanation and there is no
+# command that rebuilds either one.
+_*
+
+# The hand layout, worked out at 6, 40 and 80 cards on a phone viewport before
+# js/ui.js was written. NAMED IN A COMMENT INSIDE css/styles.css (:439), which
+# is what makes it worth keeping on disk: the stylesheet explains a decision by
+# pointing here. Unshipped — index.html never loads it — so it stays out of the
+# repository, but it is not litter.
+sketches/
+
+# Per-machine editor and session state: launch settings, transcripts. None of
+# it belongs to anybody else checking this out.
+.claude/
+
+# CAPTURED OUTPUT IS DELETED ON SIGHT, not kept. A redirected run log is a
+# transcript of one execution of something that is still on disk and still
+# runnable, so keeping it buys nothing and costs a stale copy — and a stale
+# copy is worse than none, because it reads as evidence for a version of the
+# code that no longer exists. Re-run the thing instead.
+*.log
+*.out
+
+# OS and editor litter.
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# THERE ARE NO DEPENDENCIES. package.json has no "dependencies" key, the page
+# loads ES modules straight from js/, and the one third-party library (PeerJS)
+# arrives as a pinned CDN tag in index.html. node_modules/ should therefore
+# never exist; it is listed only so that a tool which creates one cannot get it
+# committed by somebody who did not look.
+node_modules/
+
+# ---------------------------------------------------------------------------
+# NOT ignored, and deliberately so — everything in scripts/ that is not scratch:
+#
+#   scripts/test-engine.mjs   the suite itself
+#   scripts/peershim.mjs      the transport the suite talks over, headless
+#   scripts/gen-icons.js      generates icons/, which ships
+#
+# That list is hand-written, so treat it as a description rather than as the
+# enforcement — a fourth keeper added to scripts/ will not appear in it on its
+# own. What IS checkable is that nothing has fallen through the gap:
+#
+#     git ls-files --others --exclude-standard     # must print nothing
+#
+# Empty means every file on disk is either tracked or deliberately ignored. A
+# line of output is either a project file nobody staged or scratch work missing
+# its underscore, and those two look identical until somebody commits.
+# ---------------------------------------------------------------------------

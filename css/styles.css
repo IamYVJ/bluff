@@ -1,0 +1,963 @@
+/* ==========================================================================
+   styles.css — the whole look, in one file, with no build step.
+   ==========================================================================
+
+   TOKEN NAMES ARE IDENTICAL TO sequence/css/styles.css ON PURPOSE.
+
+   Three games in this family share a visual language, and the cheapest way to
+   keep them shared is for the variables to have the same names rather than
+   merely similar values. A fix to a contrast problem in one can then be read
+   and applied to the others by eye. Only the accent moves: sequence is amber,
+   judgement is blue, this is lime. --card / --card-ink / --card-red are a
+   playing card's own palette and deliberately do NOT follow the accent — a
+   seven of hearts is red in every one of these games.
+
+   Layout is mobile-first and unapologetically so. This game is played on the
+   phones that happen to be around a table, and a desktop window is the rare
+   case, handled at the bottom by capping the width rather than by a second
+   design.
+   ========================================================================== */
+
+:root {
+  --bg:        #07130E;
+  --bg-glow:   #0D2A1D;
+  --surface:   #0C1A14;
+  --surface-2: #10251F;
+  --border:      rgba(168, 204, 60, 0.22);
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --accent:     #A8CC3C;
+  --accent-ink: #12180A;
+  --accent-dim: rgba(168, 204, 60, 0.12);
+  --text:      #F1EEE4;
+  --muted:     #96A69B;
+  --warn:      #FF8A6B;
+  --warn-dim:  rgba(255, 138, 107, 0.14);
+  --warn-ink:  #9A3412;
+  --card:      #EDE6D6;
+  --card-2:    #DCD3BF;
+  --card-ink:  #23282C;
+  --card-red:  #B03A2E;
+  --radius:    14px;
+  --maxw:      640px;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Playfair Display', Georgia, serif;
+  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* The side gutter, named once so the dock's full-bleed children can cancel
+     it exactly rather than by a number that drifts. */
+  --gutter: 18px;
+}
+
+* { box-sizing: border-box; }
+
+html { height: 100%; }
+
+/* ------------------------------------------------------------------------
+   THE PAGE IS THE COLUMN, AND IT OWNS THE CEILING.
+
+   This used to be `html, body { height: 100% }` with the cap on .app, and
+   that was right while .app was the only thing on the page. It stopped being
+   right the moment index.html grew a footer: a sibling below a child that is
+   already 100dvh tall is a sibling below the fold, on a page whose whole
+   layout argument (see .app) is that it does not scroll.
+
+   So the cap moved up one level. Body is the flex column, body carries the
+   hard height, and .app is now `flex: 1 1 auto` inside it — which resolves
+   to the full viewport when the footer is hidden, i.e. to exactly what it
+   was before, and to the viewport minus the footer when it is not.
+
+   100dvh RATHER THAN 100%. `height: 100%` resolves against html, which
+   resolves against the LARGE viewport — the one that assumes the mobile URL
+   bar is already hidden. It is not hidden on first paint, so 100% is too
+   tall by the height of the bar and the page scrolls by that much before
+   anyone has touched anything. dvh tracks the bar.
+
+   THE SAFE-AREA PADDING IS NOW LOAD-BEARING, where before it was decorative.
+   With box-sizing: border-box, the 100dvh includes it, so the column's
+   content box stops above the home indicator and the dock inside .app lands
+   above it too. Before this change .app was 100dvh in its own right and
+   simply overflowed the padding, which put the dock under the indicator on
+   an iPhone — the bug this paragraph is the fix for. It also means the
+   footer needs no inset padding of its own; it is already inside the safe
+   area.
+   ------------------------------------------------------------------------ */
+body {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  /* Nothing may scroll the page. Every screen manages its own overflow; see
+     the note on .app. */
+  overflow: hidden;
+
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  /* The dock is pinned to the bottom of the screen, which on a phone is
+     exactly where the home indicator lives. */
+  padding-bottom: env(safe-area-inset-bottom);
+  overscroll-behavior-y: none;
+}
+
+/* A tap that selects the rank tile's label instead of pressing it is the most
+   common way a card game feels broken on a phone. */
+button, .tile, .seat { -webkit-tap-highlight-color: transparent; }
+button { font: inherit; color: inherit; }
+
+/* ------------------------------------------------------------------------
+   A HARD HEIGHT, NOT A MINIMUM.
+
+   This was `min-height: 100dvh`, which looks equivalent and is not. A flex
+   column with only a minimum has no ceiling to distribute, so `flex: 1 1 auto`
+   on the board never has to give anything back: when the dock grew, the app
+   grew with it and the page scrolled. Measured on a 375x667 SE under the
+   'free' rank rule, that put PLAY 94px below the fold, and at 320x568 it cut
+   the claim chips off entirely — the button that commits the move, gone, with
+   nothing on screen saying to scroll.
+
+   Capped, the arithmetic has to balance inside the viewport, and the two
+   children that own scrollbars (`.board`, `.hand`) absorb it instead. Every
+   screen below therefore manages its own overflow; none of them may rely on
+   the page scrolling, because the page no longer does.
+
+   THE CAP IS NOW INHERITED RATHER THAN DECLARED — `flex: 1 1 auto` against
+   body's 100dvh, for the footer's sake; see the note on body. Every word
+   above still holds, because a flex item with a definite ceiling handed down
+   from its container behaves exactly as one with `height` set. What changed
+   is only where the number is written.
+
+   `min-height: 0` is what makes that true. Without it a flex item's automatic
+   minimum size is its content, so a tall hand would push the item past the
+   ceiling and the cap would silently do nothing — the same failure as the
+   `min-height: 100dvh` version, arrived at from the other direction.
+
+   `width: 100%` is not redundant next to max-width. Auto margins in the cross
+   axis SUPPRESS stretch: with `margin: 0 auto` and no width, this item would
+   shrink-to-fit its content instead of filling the column, and the whole
+   layout would be as wide as its longest line.
+   ------------------------------------------------------------------------ */
+.app {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--maxw);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: radial-gradient(120% 80% at 50% -10%, var(--bg-glow) 0%, var(--bg) 55%);
+}
+
+/* The shell div every screen is written into. It looks like a wrapper worth
+   nothing and it is load-bearing: a plain block here defaults to `flex: 0 1
+   auto` with `min-height: auto`, which breaks the chain between the capped
+   `.app` and the `flex: 1 1 auto` on `.play` and `.lobby`. Their percentages
+   then resolve against nothing, and the height cap above silently does
+   nothing at all. Every ancestor between the cap and the scroller has to pass
+   the constraint down. */
+#screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.noscript {
+  max-width: 34ch; margin: 18vh auto; padding: 0 24px;
+  font-family: var(--sans); color: var(--text);
+}
+.noscript h1 { font-family: var(--serif); }
+
+/* ==========================================================================
+   THE FOOTER — a sibling of .app, outside everything ui.js writes.
+   ========================================================================== */
+
+/* `width: 100%` for the same reason .app needs it: `margin: 0 auto` in the
+   cross axis turns stretch off, and without a width this would be as wide as
+   "Peer-to-peer. No server, no accounts." and no wider, sitting left of the
+   app it belongs to on a desktop window.
+
+   No env(safe-area-inset-bottom) here. Body already carries it and body is
+   the border box the 100dvh is measured against, so this sits inside the
+   safe area by construction. Adding it again would double the gap on an
+   iPhone and do nothing anywhere else, which is the hardest kind of spacing
+   bug to spot. */
+.site-footer {
+  flex: none;
+  width: 100%; max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 14px var(--gutter);
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+  border-top: 1px solid var(--border-soft);
+}
+.site-footer .sep { opacity: 0.4; }
+
+.footer-reset {
+  margin-left: auto;
+  font: inherit; letter-spacing: inherit; text-transform: inherit;
+  background: transparent; border: 1px solid var(--border-soft);
+  border-radius: 7px; padding: 7px 9px; color: var(--muted);
+  cursor: pointer;
+}
+.footer-reset:hover, .footer-reset:focus-visible { color: var(--text); }
+.footer-reset:disabled { opacity: 0.55; cursor: default; }
+
+/* HIDDEN ONCE THERE IS A TABLE, and hidden by a class rather than by a media
+   query, because the condition is "a game is on screen" and not "the screen
+   is small". The lobby and the play screen both fill the capped column and
+   put their own scroller inside it, so a strip of chrome below them does not
+   take space from the page — the page has none to give — it takes it from
+   the hand.
+
+   The sibling combinator, because ui.js owns .app and nothing else: it never
+   touches document or body, which is what keeps it testable and what stops
+   two files from both believing they manage the page. render() sets the class
+   on its own root; this selector reaches across from there.
+
+   It is deliberately still VISIBLE on the home and joining screens, and on a
+   page where js/main.js never ran at all. That last one is the case the
+   button inside it exists for. */
+.app.in-play ~ .site-footer { display: none; }
+
+/* --- shared atoms --------------------------------------------------------- */
+
+.mono { font-family: var(--mono); }
+
+.label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted);
+}
+
+.btn {
+  min-height: 52px;
+  width: 100%;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--mono); font-size: 14px; font-weight: 700; letter-spacing: 0.06em;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn.ghost {
+  background: transparent; color: var(--muted);
+  border-color: var(--border-soft); min-height: 40px; font-size: 12px;
+}
+.btn.warnish {
+  background: var(--warn-dim); color: var(--warn); border-color: var(--warn);
+}
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-row { display: flex; gap: 9px; }
+.btn-row > .btn { width: auto; flex: 1 1 0; }
+
+/* Every interactive element gets a visible ring. The accent on this dark
+   ground is high enough contrast to serve as the focus colour throughout. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Shown on the first Tab press only; a keyboard player should be able to reach
+   their own hand without walking the whole seat list. */
+.skip-link {
+  position: absolute; left: -9999px; top: 0; z-index: 30;
+  background: var(--accent); color: var(--accent-ink);
+  padding: 10px 14px; border-radius: 0 0 var(--radius) 0;
+  font-family: var(--mono); font-size: 12px;
+}
+.skip-link:focus { left: 0; }
+
+/* --- the error line ------------------------------------------------------
+   Engine refusals are sentences meant to be read ("You must claim Four."), so
+   they go somewhere fixed rather than into an alert that has to be dismissed
+   before the player can act on what it said. */
+.flash {
+  position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+  z-index: 40; max-width: min(92vw, var(--maxw));
+  background: var(--warn-dim); color: var(--warn);
+  border: 1px solid var(--warn); border-radius: 999px;
+  padding: 9px 18px;
+  font-family: var(--mono); font-size: 12px; text-align: center;
+  box-shadow: 0 8px 26px rgba(0,0,0,0.5);
+}
+
+/* ==========================================================================
+   THE JOIN SCREEN
+   ========================================================================== */
+
+.join {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 14px; padding: 30px var(--gutter);
+}
+.brand {
+  font-family: var(--serif); font-weight: 900; font-size: 46px;
+  line-height: 1; letter-spacing: -0.02em; color: var(--accent);
+  margin: 0;
+}
+.brand-sub {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--muted); margin: 0 0 8px;
+}
+.join p { color: var(--muted); font-size: 13.5px; margin: 0; max-width: 42ch; }
+
+.field { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; }
+.field input {
+  min-height: 52px; padding: 0 15px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-family: var(--sans); font-size: 17px;
+}
+.field input::placeholder { color: var(--muted); opacity: 0.7; }
+
+/* The code field and its button sit on one line: the code is four characters
+   and a full-width input for four characters looks like it wants a sentence. */
+.field.row { flex-direction: row; align-items: stretch; gap: 9px; }
+.field.row input {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 22px;
+  letter-spacing: 0.32em; text-align: center;
+  text-transform: uppercase;
+}
+/* The tracking above adds a phantom space after the last glyph, which on a
+   centred field reads as a leaning code. Half of it back on the left. */
+.field.row input { text-indent: 0.32em; }
+.field.row input::placeholder { letter-spacing: 0.18em; font-size: 15px; }
+.field.row .btn { width: auto; flex: 0 0 auto; padding: 0 22px; }
+
+/* Visible to a screen reader, gone for everyone else. The code field's label
+   is carried by its placeholder for sighted users and that is not enough. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+/* --- the home screen ------------------------------------------------------ */
+
+.home { gap: 12px; }
+
+/* A rule with a word in it. The three ways in are genuinely alternatives, and
+   stacking three buttons with no separation reads as a sequence of steps. */
+.or {
+  display: flex; align-items: center; gap: 10px;
+  margin: 2px 0;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted);
+}
+.or::before, .or::after {
+  content: ''; flex: 1 1 0; height: 1px; background: var(--border-soft);
+}
+
+/* Something the app wants to say before anything has happened: the connection
+   library did not load, the last table refused us, the host closed it. Warm
+   rather than alarming — none of these are the player's fault. */
+.net-note {
+  background: var(--warn-dim); color: var(--warn);
+  border: 1px solid var(--warn); border-radius: var(--radius);
+  padding: 10px 13px; font-size: 13px; line-height: 1.45;
+}
+
+/* --- dialling ------------------------------------------------------------- */
+
+/* The code fills the .brand slot on this screen, so it has to stop being a
+   serif display face and start being four characters read off a phone. */
+.waiting .brand {
+  font-family: var(--mono); font-weight: 700; font-size: 40px;
+  letter-spacing: 0.22em; text-indent: 0.22em;
+}
+
+.dots { display: flex; gap: 7px; margin: 4px 0 2px; }
+.dots i {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); opacity: 0.25;
+  animation: dot 1.25s ease-in-out infinite;
+}
+.dots i:nth-child(2) { animation-delay: 0.18s; }
+.dots i:nth-child(3) { animation-delay: 0.36s; }
+@keyframes dot {
+  0%, 70%, 100% { opacity: 0.22; transform: translateY(0); }
+  35%           { opacity: 1;    transform: translateY(-3px); }
+}
+/* A waiting animation is exactly the kind of thing that is decorative to one
+   person and nauseating to another, and there is nothing here it is carrying
+   that the sentence above it does not already say. */
+@media (prefers-reduced-motion: reduce) {
+  .dots i { animation: none; opacity: 0.5; }
+}
+
+/* --- the connection line above a live game -------------------------------- */
+
+/* Only rendered when something is wrong; see netBanner() in js/ui.js. In the
+   flow rather than fixed, because the one place it must never sit on top of
+   is the turn strip, which is the line telling you it is your go. */
+.net-bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 7px var(--gutter);
+  background: var(--accent-dim); color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+}
+.net-bar.lost {
+  background: var(--warn-dim); color: var(--warn); border-bottom-color: var(--warn);
+}
+.net-bar button {
+  flex: 0 0 auto; cursor: pointer;
+  background: transparent; color: inherit;
+  border: 1px solid currentColor; border-radius: 999px;
+  padding: 3px 10px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+}
+
+/* --- the room code, in the lobby ------------------------------------------ */
+
+/* The first thing on the host's lobby and the thing every guest needs. Mono
+   and widely tracked because it is going to be read ALOUD across a table —
+   the whole job of the alphabet in js/util.js is that no two characters look
+   or sound alike, and a proportional face gives half of that back. */
+.room {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 13px;
+}
+.room-left { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.room-code {
+  font-family: var(--mono); font-weight: 700; font-size: 30px; line-height: 1.05;
+  letter-spacing: 0.24em; text-indent: 0.24em; color: var(--accent);
+}
+.room.pending .room-code { color: var(--muted); }
+.room-copy { width: auto; flex: 0 0 auto; padding: 0 16px; }
+
+/* ==========================================================================
+   THE LOBBY
+   ========================================================================== */
+
+.lobby {
+  flex: 1 1 auto;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 18px var(--gutter) 24px;
+  overflow-y: auto;
+}
+.lobby-head { display: flex; align-items: baseline; gap: 10px; }
+.lobby-head h1 { font-family: var(--serif); font-size: 26px; margin: 0; color: var(--accent); }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 11px;
+}
+.panel > h2 {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted); margin: 0;
+}
+
+/* --- seats ---------------------------------------------------------------- */
+
+.seat-list { display: flex; flex-direction: column; gap: 6px; }
+.seat-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: 10px; padding: 8px 10px;
+}
+.seat-row .num {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  min-width: 1.6em;
+}
+.seat-row .who { flex: 1 1 auto; font-size: 14.5px; }
+.seat-row .tag {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--accent);
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px;
+}
+.seat-row .tag.off { color: var(--warn); border-color: var(--warn); }
+.icon-btn {
+  min-width: 34px; height: 34px; flex: none;
+  border-radius: 8px; cursor: pointer;
+  background: transparent; border: 1px solid var(--border-soft);
+  color: var(--muted); font-family: var(--mono); font-size: 13px;
+}
+.icon-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+/* --- presets and config --------------------------------------------------- */
+
+.presets { display: flex; gap: 7px; flex-wrap: wrap; }
+.preset {
+  flex: 1 1 28%; min-height: 44px; cursor: pointer;
+  border-radius: 10px; padding: 8px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  color: var(--text);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.preset.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+.blurb { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.5; }
+
+.opt { display: flex; flex-direction: column; gap: 7px; }
+.opt-head { display: flex; align-items: baseline; gap: 8px; }
+.opt-head .label { flex: 1 1 auto; }
+.opt-head .val { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+
+.seg { display: flex; gap: 6px; }
+.seg button {
+  flex: 1 1 0; min-height: 44px; cursor: pointer;
+  border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+}
+.seg button.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+.stepper { display: flex; align-items: center; gap: 9px; }
+.stepper button {
+  width: 46px; height: 46px; flex: none; cursor: pointer;
+  border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  color: var(--text); font-family: var(--mono); font-size: 19px; font-weight: 700;
+}
+.stepper button:disabled { opacity: 0.25; cursor: not-allowed; }
+.stepper .read {
+  flex: 1 1 auto; text-align: center;
+  font-family: var(--mono); font-size: 15px; font-weight: 700;
+}
+
+.deal-line {
+  font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+  background: var(--accent-dim); border: 1px solid var(--border);
+  border-radius: 10px; padding: 9px 12px; line-height: 1.5;
+}
+.blocker {
+  font-family: var(--mono); font-size: 11.5px; color: var(--warn);
+  background: var(--warn-dim); border: 1px solid var(--warn);
+  border-radius: 10px; padding: 9px 12px; line-height: 1.5;
+}
+
+/* ==========================================================================
+   THE PLAY SCREEN
+   Promoted from sketches/hand.html once the layout was settled. The panels in
+   that file are the record of why each of these looks the way it does.
+   ========================================================================== */
+
+.play { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+
+/* --- turn strip ----------------------------------------------------------- */
+.turn-strip {
+  flex: none;
+  padding: 14px var(--gutter) 12px;
+  display: flex; align-items: center; gap: 9px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+  padding-top: calc(14px + env(safe-area-inset-top));
+}
+.turn-strip.mine {
+  background-image: linear-gradient(var(--accent-dim), var(--accent-dim));
+  border-bottom-color: var(--accent);
+}
+.strip-name { font-family: var(--serif); font-weight: 700; font-size: 17px; color: var(--accent); }
+.strip-state {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.strip-right { margin-left: auto; display: flex; align-items: center; gap: 12px; flex: none; }
+.pile-count { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--muted); }
+.pile-count b { color: var(--text); font-size: 14px; }
+
+/* --- the board ------------------------------------------------------------ */
+/* Shrink weight 100 against the dock's 1, so the board is what gives way when
+   the screen runs short. Both are scrollable and something has to yield, but
+   they are not equally important while a move is being built: the board is
+   reference you glance at, the hand is the thing under your thumb. Left to
+   flex's default proportional shrinking the dock lost more (it is bigger), and
+   an 80-card hand collapsed to a 34px sliver on a 320px phone while the seat
+   list sat there at full height.
+
+   The 84px floor is one seat row plus a peek of the next, which is the least
+   that is still worth looking at — below that the board stops giving and the
+   hand starts. */
+.board {
+  flex: 1 100 auto; min-height: 84px; overflow-y: auto;
+  padding: 12px var(--gutter) 0;
+  display: flex; flex-direction: column; gap: 11px;
+}
+
+/* --- forced rank banner ---------------------------------------------------
+   Under the ascending rule the player does not choose the rank, and a screen
+   that offers thirteen chips and refuses twelve of them is a screen that has
+   not read its own rules. */
+.forced {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.forced-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.forced-rank {
+  font-family: var(--serif); font-weight: 900; font-size: 30px; line-height: 1;
+  color: var(--accent); margin-left: auto;
+}
+
+/* --- seats ---------------------------------------------------------------- */
+.seats { display: flex; flex-direction: column; gap: 5px; }
+.seat {
+  display: flex; align-items: center; gap: 9px;
+  background: var(--surface); border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--border-soft);
+  border-radius: 10px; padding: 7px 11px;
+}
+.seat.is-turn { border-left-color: var(--accent); background: var(--surface-2); }
+.seat.is-offline { opacity: 0.5; }
+.seat-name { font-size: 13.5px; flex: 1 1 auto; }
+.seat.is-me .seat-name { font-weight: 600; }
+.seat-bot {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); margin-left: 6px;
+}
+.seat-cards {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  color: var(--text); flex: none;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: 999px; padding: 3px 10px;
+}
+/* THE LOUD STATE. A player down to one or two cards is the entire tension of
+   an endgame, so it is the one thing on the board allowed to shout. */
+.seat.is-low .seat-cards { color: var(--warn); border-color: var(--warn); background: var(--warn-dim); }
+.seat.is-low .seat-name::after {
+  content: 'about to go out';
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--warn); margin-left: 8px;
+}
+
+/* --- claim history -------------------------------------------------------- */
+.history { display: flex; flex-direction: column; gap: 3px; padding-bottom: 6px; }
+.h-row { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; gap: 7px; }
+.h-row b { color: var(--text); font-weight: 400; }
+.h-row .h-who { color: var(--accent); min-width: 4.5em; flex: none; }
+
+/* --- host controls -------------------------------------------------------- */
+.host-row { display: flex; gap: 8px; padding-bottom: 8px; }
+.host-row .btn { min-height: 36px; font-size: 11px; }
+
+/* ==========================================================================
+   THE HAND DOCK
+   ========================================================================== */
+
+/* ------------------------------------------------------------------------
+   THE DOCK IS A COLUMN, AND ONLY THE HAND GIVES WAY.
+
+   `flex: none` alone is not enough. The dock's own height is the sum of four
+   variable things — fourteen tiles, an open count picker, up to thirteen
+   claim chips, the commit bar — and at the worst legal table (three decks,
+   'free' ranks, eighty cards) that sum reached 568px. On a 667px phone the
+   dock ate the board; on a 568px one it ate itself, and the PLAY button went
+   with it.
+
+   So the dock is a column with a priority order. The commit bar and the claim
+   chips are `flex: none` — they are the move being committed and must always
+   be under the thumb. The hand grid is the one child allowed to shrink and
+   scroll, because a hand you scroll is merely inconvenient while a PLAY
+   button you cannot reach is a dead end.
+   ------------------------------------------------------------------------ */
+.dock {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 0 14px;
+  background: linear-gradient(to top, var(--bg) 62%, rgba(7, 19, 14, 0.85));
+  border-top: 1px solid var(--border-soft);
+}
+.dock-head, .picker, .claim-pick, .commit { flex: none; }
+.dock-head { display: flex; align-items: baseline; gap: 8px; padding: 0 var(--gutter) 8px; }
+.dock-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.dock-total { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--muted); margin-left: auto; }
+.dock-total b { color: var(--text); }
+
+/* ------------------------------------------------------------------------
+   THE HAND WRAPS. IT NEVER SCROLLS SIDEWAYS.
+
+   The first version was a horizontal strip, which is the obvious answer and
+   is what the spec asked for. Measuring the sketch killed it: at 40 and 80
+   cards the strip pushed 551px of tiles off the right edge — about nine of
+   the fourteen — with nothing on screen to say they existed. It overflowed
+   even at six cards, the smallest hand the game can deal.
+
+   sequence learned the same thing the same way. A hand you cannot see is a
+   hand you cannot play, and in THIS game that is worse than merely awkward:
+   the cards you forgot you held are the cards you would have bluffed with.
+
+   Wrapping costs 143px of board (the dock goes 125px to 268px). Measured
+   down to a 375x667 SE, the seats and every history row still fit. The board
+   is smaller; nothing is lost.
+
+   Five columns rather than seven: fourteen ranks land in three rows, and a
+   58px tile stays a comfortable thumb target on the narrowest phone shipping.
+
+   The `overflow-y` is the pressure valve for the dock rule above, and it is
+   deliberately the LAST thing to give: on any phone with room for three rows
+   of tiles it never fires at all. Vertical only — a sideways scrollbar here
+   is the exact failure this whole layout was chosen to avoid.
+   ------------------------------------------------------------------------ */
+.hand {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 7px;
+  /* 7px of top padding, not 2px: the count badge sits 5px above the tile and
+     a scroll container clips anything outside its padding box. */
+  padding: 7px var(--gutter) 8px;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tile {
+  border: 0; padding: 0; cursor: pointer;
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--card-ink);
+  position: relative;
+  height: 66px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--serif); font-weight: 900; font-size: 25px; line-height: 1;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+.tile.joker { background: var(--card-2); font-size: 14px; letter-spacing: 0.04em; }
+.tile:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tile-badge {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 21px; height: 21px; padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink);
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--bg);
+}
+/* One copy only: a badge reading "1" on half the hand is noise, so the bare
+   tile says it instead. */
+.tile.single .tile-badge { display: none; }
+
+.tile-picked {
+  position: absolute; inset: 0; border-radius: 9px;
+  border: 3px solid var(--accent);
+  background: rgba(168, 204, 60, 0.28);
+  display: flex; align-items: flex-end; justify-content: center;
+  padding-bottom: 5px;
+  font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--accent-ink);
+}
+.tile.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- the count picker -----------------------------------------------------
+   Step two of two. Tapping a rank asks how many, rather than adding one card
+   per tap: the counts that are illegal — past what you hold, past the table's
+   maxPlay, past what is left in this play — arrive already disabled, so the
+   ceiling is visible before you hit it instead of afterwards as a refusal. */
+.picker {
+  margin: 0 var(--gutter) 9px; padding: 11px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent); border-radius: 12px;
+}
+.picker-q {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 9px;
+}
+.picker-q b { color: var(--text); }
+/* A grid rather than a row. maxPlay reaches eight at three decks, and eight
+   buttons sharing 334px is a 35px target — under the 44px floor, on the one
+   control that decides how big a lie you are telling. Four per row keeps every
+   count at a thumb's width whatever the deck count. */
+.counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+.count-btn {
+  height: 46px; cursor: pointer;
+  border-radius: 10px; background: var(--surface);
+  border: 1px solid var(--border-soft); color: var(--text);
+  font-family: var(--mono); font-size: 17px; font-weight: 700;
+}
+.count-btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.count-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* --- claim chooser --------------------------------------------------------
+   Only rendered when there is a choice. Under 'ascending' there is exactly
+   one legal claim and the forced banner has already said what it is. */
+.claim-pick { padding: 0 var(--gutter) 9px; display: flex; flex-direction: column; gap: 7px; }
+.claim-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  min-width: 46px; min-height: 44px; cursor: pointer;
+  border-radius: 10px; padding: 0 10px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  color: var(--text);
+  font-family: var(--serif); font-weight: 900; font-size: 19px;
+}
+.chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* --- commit bar ----------------------------------------------------------- */
+.commit { padding: 0 var(--gutter); display: flex; flex-direction: column; gap: 8px; }
+.commit-read {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
+  color: var(--muted); text-align: center; line-height: 1.5;
+}
+.commit-read b { color: var(--text); }
+.commit-read .lie { color: var(--warn); }
+.commit-read .true { color: var(--accent); }
+
+/* ==========================================================================
+   THE CHALLENGE WINDOW
+   ========================================================================== */
+
+.window-wrap { padding: 0 var(--gutter) 14px; display: flex; flex-direction: column; gap: 10px; }
+.claim-card {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px; text-align: center;
+}
+.claim-who { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.claim-what { font-family: var(--serif); font-weight: 900; font-size: 34px; line-height: 1.15; margin: 4px 0 2px; }
+.claim-sub { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.claim-sub.pending { color: var(--warn); }
+
+.facedown { display: flex; gap: 6px; justify-content: center; margin: 13px 0 2px; flex-wrap: wrap; }
+.fd {
+  width: 40px; height: 56px; border-radius: 7px;
+  background: repeating-linear-gradient(45deg, #17372a, #17372a 4px, #143025 4px, #143025 8px);
+  border: 1px solid var(--border-soft);
+}
+
+/* A bar AND a number. The bar is read without counting and the number is read
+   without estimating, and under three seconds people need both. */
+.countdown { display: flex; align-items: center; gap: 10px; }
+.cd-bar {
+  flex: 1 1 auto; height: 7px; border-radius: 4px;
+  background: var(--surface-2); overflow: hidden; border: 1px solid var(--border-soft);
+}
+.cd-fill { height: 100%; background: var(--accent); width: 100%; }
+.cd-num {
+  font-family: var(--mono); font-size: 15px; font-weight: 700;
+  color: var(--accent); min-width: 2.4em; text-align: right;
+}
+
+.btn-challenge { min-height: 66px; font-size: 17px; letter-spacing: 0.1em; }
+
+/* The spent state. It does not vanish: a control that disappears the instant
+   it stops working reads as a bug, and the player who was reaching for it has
+   no idea whether they missed it or it was never there. */
+.btn-challenge.shut {
+  background: transparent; color: var(--muted); border-color: var(--border-soft);
+  border-style: dashed; opacity: 0.55;
+}
+.spent .cd-fill { width: 0; }
+.spent .cd-num, .spent .cd-bar { opacity: 0.4; }
+
+.watching {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); text-align: center;
+  padding: 14px 0;
+}
+
+/* ==========================================================================
+   THE REVEAL
+   The payoff of the whole game, and the only moment anyone finds out whether
+   they were lied to. It is engine state (REVEAL_HOLD_MS), not an animation —
+   every device agrees nobody may move yet, so the player with the fastest
+   thumbs does not decide how long everyone else gets to look.
+   ========================================================================== */
+
+.reveal-scrim {
+  position: fixed; inset: 0; z-index: 20;
+  background: rgba(3, 9, 7, 0.88);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 22px; gap: 14px; text-align: center;
+  animation: fade-in 180ms ease-out;
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.rv-said {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); max-width: 34ch;
+}
+.rv-said b { color: var(--text); }
+.rv-verdict {
+  font-family: var(--serif); font-weight: 900; font-size: 42px; line-height: 1;
+  color: var(--warn); letter-spacing: -0.01em;
+}
+.rv-verdict.true { color: var(--accent); }
+
+.rv-cards { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 2px 0 14px; }
+.rv-card {
+  width: 62px; height: 86px; border-radius: 9px;
+  background: var(--card); color: var(--card-ink);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-family: var(--serif); font-weight: 900; font-size: 27px; line-height: 1;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  position: relative;
+}
+.rv-card .suit { font-size: 17px; margin-top: 3px; }
+.rv-card.red { color: var(--card-red); }
+.rv-card.joker { background: var(--card-2); font-size: 13px; }
+.rv-card.bad { outline: 3px solid var(--warn); }
+/* Written by ui.js per card, because "not a King" is only the right words
+   when the claim was Kings. */
+.rv-card.bad::after {
+  content: attr(data-why);
+  position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 8px; letter-spacing: 0.08em;
+  color: var(--warn); white-space: nowrap;
+}
+.rv-outcome {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: 999px; padding: 9px 17px;
+}
+.rv-outcome b { color: var(--warn); }
+.rv-outcome.true b { color: var(--accent); }
+.rv-foot {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted);
+}
+
+/* ==========================================================================
+   GAME OVER
+   ========================================================================== */
+
+/* Ten seats at three decks is ten final rows; on a short phone that is taller
+   than the screen, and PLAY AGAIN is the last thing in it. */
+.over {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 16px; padding: 30px var(--gutter);
+}
+.over-verdict { font-family: var(--serif); font-weight: 900; font-size: 40px; line-height: 1.05; margin: 0; }
+.over-verdict .who { color: var(--accent); }
+.final { display: flex; flex-direction: column; gap: 6px; }
+.final-row {
+  display: flex; align-items: center; gap: 9px;
+  background: var(--surface); border: 1px solid var(--border-soft);
+  border-radius: 10px; padding: 9px 12px;
+}
+.final-row.won { border-color: var(--accent); background: var(--accent-dim); }
+.final-row .who { flex: 1 1 auto; font-size: 14.5px; }
+
+/* ==========================================================================
+   Wider screens. Not a second design — the same column, centred, with the
+   dock no longer glued to a phone's bottom edge.
+   ========================================================================== */
+
+@media (min-width: 680px) {
+  .app { border-left: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft); }
+  .hand { grid-template-columns: repeat(7, 1fr); }
+  .brand { font-size: 58px; }
+}
+
+/* Somebody at the table will have this switched on. The reveal's fade is the
+   only motion in the app, and it is decoration. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

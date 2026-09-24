@@ -1,0 +1,1098 @@
+// ============================================================================
+// net.js — The peer-to-peer transport. WebRTC via PeerJS, host-authoritative.
+//
+// SHAPE: A STAR, NEVER A MESH.
+//   The host creates a Peer whose id is derived from the four-character room
+//   code, so a joiner can reconstruct the host's address from the code alone
+//   and no lookup service is needed. Every joiner opens exactly one
+//   DataConnection to the host; joiners never talk to each other. The host runs
+//   the only GameEngine that exists, validates everything, and sends each
+//   device the public table plus exactly one private slice — its own hand.
+//
+//   Bluff seats up to eight, so that is one host and up to seven spokes. A mesh
+//   would be twenty-eight channels to keep alive on somebody's phone, and would
+//   need a consensus rule for who dealt. A star needs neither, at the price of
+//   the host being a single point of failure — which is what the engine
+//   snapshot in js/util.js is for.
+//
+// ----------------------------------------------------------------------------
+// THE HONESTY PROBLEM THIS FILE CREATES, STATED WHERE IT HAPPENS.
+//   In a trick-taking game the host knowing every hand is a footnote. Here it
+//   is the whole game: Bluff is played entirely out of what the other players
+//   cannot see, and pushState() below is the function that decides who sees
+//   what. The host's tab holds every hand, so a host who opens the console can
+//   read the table, and no amount of care in this file changes that — the cards
+//   have to live somewhere and the host's device is where.
+//
+//   There is no fix inside a peer-to-peer design. Moving the authority to a
+//   server is the fix, and js/intents.js is the seam that exists to keep that
+//   change cheap. It goes in the README rather than being quietly hoped about.
+//
+//   What this file CAN do is make sure the host is the only device with that
+//   problem: that no player ever receives another player's hand, by accident or
+//   by asking. That invariant is written down in exactly one place —
+//   stateFrameFor() — and the harness holds it to account.
+//
+// ----------------------------------------------------------------------------
+// SIGNALLING, AND WHY A CACHED PWA STILL NEEDS THE INTERNET.
+//   PeerJS needs a "broker" (a signalling server) ONCE, to carry the WebRTC
+//   handshake. After that, game traffic goes device to device. The default
+//   broker is PeerJS's free public cloud, so the initial handshake needs the
+//   internet to be reachable even though the app shell itself loads from cache.
+//
+//   The consequence worth stating plainly: a room code is an address on a
+//   PUBLIC broker, not a LAN-local one. peerIdForCode() is derivable by
+//   anybody, and there are only 32^4 ≈ 1M codes. Everything in js/guards.js,
+//   and the clientId rule in js/state.js addPlayer(), exists because of that
+//   sentence.
+//
+//   FOR FULLY-OFFLINE LAN PLAY: run a PeerServer on the LAN,
+//       npx peer --port 9000 --key peerjs --path /bluff
+//   and point BROKER_CONFIG at it:
+//       export const BROKER_CONFIG = {
+//         host: '192.168.1.50', port: 9000, path: '/bluff',
+//         key: 'peerjs', secure: false,
+//       };
+//   Every device at the table must use the same broker config to find the
+//   others.
+//
+// ----------------------------------------------------------------------------
+// ZERO DEPENDENCIES AND A PEERJS TRANSPORT ARE NOT IN CONFLICT.
+//   PeerJS arrives as a UMD bundle from a CDN <script> tag in index.html and is
+//   read off `window.Peer`. It is never imported, so package.json still has no
+//   `dependencies` key, there is no build step, and nothing third-party is
+//   vendored into this repo. The cost is that the one thing in this app which
+//   can be missing while everything else works is the transport — hence
+//   peerAvailable() below, and the inert transport that reports it as a normal
+//   error instead of throwing out of a click handler.
+//
+// ----------------------------------------------------------------------------
+// NAT TRAVERSAL — WHAT ACTUALLY HAPPENS.
+//   newPeer() passes no `config`, so PeerJS's DEFAULT iceServers apply: Google
+//   STUN plus two public TURN relays run by peerjs.com, with credentials baked
+//   into the library and shared with every PeerJS app on the internet.
+//
+//   So this is not LAN-only and never was. STUN hole-punching connects two
+//   ordinary home routers on different ISPs, and when it fails WebRTC relays
+//   through peerjs.com. Keeping the default is deliberate — this game is at
+//   least as good over a video call as it is around a table — with three
+//   consequences the rest of the code has to be honest about:
+//
+//     1. A table is reachable from anywhere by anyone holding the code. That is
+//        why a seat mid-game belongs to a clientId and not to a display name,
+//        and why this host applies the same bounds to a peer that a server
+//        would (js/guards.js).
+//     2. Cross-network ICE shows each player's public IP to the others. There
+//        is no way around that in a peer-to-peer game; a server transport is
+//        the answer for anyone who minds.
+//     3. A relayed game depends on somebody else's infrastructure staying up.
+//        The DataChannel is DTLS-encrypted end to end, so a relay forwards
+//        ciphertext it cannot read — availability is the exposure here, not
+//        confidentiality. Which matters more than usual in this game: the
+//        frames being relayed contain hands.
+//
+//   To make this LAN-only, pass `config: { iceServers: [] }` in newPeer(): with
+//   no STUN and no relay, only host candidates are gathered.
+//
+//   Connections still fail silently. Symmetric NAT with the relay blocked,
+//   "client isolation" guest Wi-Fi, and some corporate networks all produce the
+//   same thing: the broker cheerfully says the host exists, and then the data
+//   channel never comes up and nobody errors. That silence is why a joinHost()
+//   caller needs a deadline of its own — see the note on joinHost().
+//
+// ----------------------------------------------------------------------------
+// SEAT RECLAIM: WHICH HALF OF IT IS HERE.
+//   js/state.js owns the RULE: addPlayer() matches on clientId and on nothing
+//   else, in any phase, and hands back the seat with its hand intact. A name is
+//   never a seat ticket. In this game the stake is unusually clear — the thing
+//   handed back is a set of cards nobody else may see, so "close enough"
+//   matching is not available.
+//
+//   This file owns the three transport facts that make the rule reachable:
+//
+//     1. THE ADDRESS SURVIVES. The host's peer id is derived from the room
+//        code, so a host that reloads, or blips off Wi-Fi, comes back at the
+//        same address. Reconnecting is therefore just joining again, and
+//        nothing has to be renegotiated or re-shared.
+//     2. THE TICKET TRAVELS. joinHost() sends the JOIN frame itself, exactly
+//        once per connection, carrying the clientId. A caller cannot forget to.
+//     3. ONE CONNECTION IS ONE IDENTITY. A connection that has already
+//        announced a clientId may repeat it, and may not change it — see the
+//        note in the host's data handler for what the alternative allows.
+//
+//   What this file must NOT do is decide anything about seats. It does not
+//   import js/state.js, has no idea how many seats exist, and never refuses a
+//   connection because "the table is full": a disconnected player coming back
+//   mid-game arrives on a brand-new connection to a table that is, by
+//   definition, already full. Turning them away at the door would make reclaim
+//   impossible at exactly the table where it matters.
+//
+// ----------------------------------------------------------------------------
+// WHAT IS DELIBERATELY NOT HERE.
+//   * No discovery / open-table list. PeerJS's listAllPeers() only answers on a
+//     broker configured with allow_discovery, which the public cloud is not, so
+//     it would be a feature that works on nobody's phone. Typing four
+//     characters is the join flow.
+//   * No lobbyQuery frame, even though js/state.js has a lobbyInfo() and
+//     js/intents.js's header names one. A peek-before-joining frame needs a
+//     host that answers strangers, and the payload it would answer with —
+//     player count, phase, the host's name — is exactly what a prober wants and
+//     what a legitimate joiner learns a quarter of a second later anyway by
+//     joining. lobbyInfo() stays as the shape that call would take if a reason
+//     for it ever appears; adding the frame now would be a fifth thing to
+//     validate in exchange for nothing.
+//   * No game rules of any kind. Every frame this file admits still goes
+//     through js/intents.js and then the engine, which checks the phase, the
+//     turn, the seat, the cards held and the owner for itself. Deleting this
+//     file's validation would not make one illegal move legal — see the header
+//     of js/guards.js, which says the same thing from the other side.
+//   * No turn timers and no heartbeat. The engine's two deadlines are driven by
+//     the host's own clock in js/main.js, and a heartbeat would only tell us
+//     what 'close' already tells us, a few seconds sooner, at the price of
+//     traffic on every phone in the room for the whole game.
+// ============================================================================
+
+import {
+  TokenBucket, decodePeerFrame, MAX_CONNECTIONS,
+  validPlayerId, validName, validClientId, validPublicState, validPrivateState,
+} from './guards.js';
+import { normalizeCode, CODE_LENGTH } from './util.js';
+
+// Set to null to use PeerJS's default public cloud broker. Replace with an
+// object (see the header) to self-host signalling for offline LAN play.
+export const BROKER_CONFIG = null;
+
+// ---------------------------------------------------------------------------
+// Ceilings for a host that is somebody's phone.
+// ---------------------------------------------------------------------------
+
+/**
+ * How many refused frames a connection may send before it is closed.
+ *
+ * A refused frame is dropped in SILENCE. Replying "too fast" to a flood answers
+ * every packet of it, which is the amplification the bucket exists to prevent.
+ * Persistent refusal is not a slow client though, it is a script, so the
+ * connection eventually goes rather than being throttled forever.
+ */
+export const MAX_REFUSED_FRAMES = 120;
+
+/**
+ * How long a connection may sit half-open before the host forgets it.
+ *
+ * This is not a tight network timeout and must not become one. It never
+ * interrupts a connection that has opened, and it never shortens a handshake —
+ * an honest ICE negotiation over a TURN relay on a bad phone network finishes
+ * in a few seconds, so thirty is an order of magnitude of slack.
+ *
+ * It exists because MAX_CONNECTIONS counts connections we ACCEPTED, and a
+ * DataConnection that never opens does not reliably fire 'close' or 'error'.
+ * Without a reaper those slots are held for the life of the tab, and the table
+ * that cannot be joined is the host's own.
+ */
+const HANDSHAKE_BUDGET_MS = 30000;
+
+// ---------------------------------------------------------------------------
+// Room code <-> peer id
+//
+// Namespaced, because the public broker is shared with every other PeerJS app
+// on the internet and a bare four-character id would collide with them — and
+// specifically with `sequence` and `judgement`, which are the same four
+// characters from the same alphabet generated by the same function.
+//
+// Versioned, because a future change to the wire protocol can then be made by
+// bumping this: old and new clients simply fail to find each other, instead of
+// connecting and disagreeing about what a message means. In this game that
+// second failure would be particularly bad — two clients disagreeing about what
+// `ranks` means is two players who think different cards are on the table.
+// ---------------------------------------------------------------------------
+export const PEER_PREFIX = 'bluff-v1-';
+
+/**
+ * The broker address for a room code, or NULL if that is not a room code.
+ *
+ * Normalised through js/util.js rather than upper-cased here, so a code pasted
+ * out of a chat message as "qr-tx" finds the same table as one typed as "QRTX"
+ * — and so the alphabet lives in exactly one place. normalizeCode() DROPS
+ * characters outside the alphabet, which means a typed O is not guessed at as a
+ * zero; what comes back is shorter, and that is what the length check below
+ * turns into a refusal.
+ *
+ * Returning null rather than a best-effort id matters. Without it, every joiner
+ * who typed something unusable would dial the bare prefix — the same address as
+ * every other such joiner — and the first person to fat-finger the field while
+ * a second person had done the same would find themselves in a game with a
+ * stranger, holding cards.
+ */
+export function peerIdForCode(code) {
+  const room = normalizeCode(code);
+  return room.length === CODE_LENGTH ? PEER_PREFIX + room : null;
+}
+
+export function codeFromPeerId(id) {
+  return typeof id === 'string' && id.startsWith(PEER_PREFIX)
+    ? id.slice(PEER_PREFIX.length)
+    : null;
+}
+
+// ---------------------------------------------------------------------------
+// Connection id -> player id. THIS PREFIX IS A SECURITY BOUNDARY.
+//
+// A joiner chooses its own peer id: `new Peer('whatever')`. The host learns it
+// as conn.peer and would otherwise hand it straight to the engine as the actor
+// behind every message that connection sends.
+//
+// That is an impersonation vector, and in this game it is the worst one there
+// is. Follow it through concretely, because the abstract version undersells it.
+// The host's own engine id is HOST_ID below, and while it is hosting it is also
+// engine.hostId. A peer that simply registered itself as 'host' on the broker
+// would therefore:
+//
+//   * pass the owner guard in js/intents.js and be able to set the config, seat
+//     and remove bots, reorder the table, start the game, skip turns and end it;
+//   * be found by seatOf() as the host's seat, and so play out of the host's
+//     own hand;
+//   * and — this is the one that has no counterpart in the sibling games —
+//     receive the host's CARDS. pushState() below asks privateFor() for the id
+//     of the peer it is about to send to. Unprefixed, that id is 'host', which
+//     resolves to a real seat, and privateStateFor('host') returns that seat's
+//     hand. The whole game is what the other players cannot see, and this would
+//     post it to them on every change.
+//
+// The source of this app is a static file anybody can read, so HOST_ID is not a
+// secret and was never going to be.
+//
+// Prefixing closes the whole class of it. Every id the engine ever sees from
+// this transport is 'peer:' + something, a space that neither HOST_ID nor the
+// engine's own 'bot:xxxxxxxx' ids are in and that neither can be pushed into: a
+// peer registering as 'peer:host' arrives as 'peer:peer:host'. The prefix is
+// added HERE, by us, to a string we received — never sent by the peer, and so
+// never something a peer can skip.
+//
+// The three assertions below run at module load, in the browser, on the first
+// page load. Renaming HOST_ID to something that collides, or changing either
+// prefix so that one contains the other, fails loudly rather than shipping as a
+// hole.
+// ---------------------------------------------------------------------------
+export const CONN_ID_PREFIX = 'peer:';
+
+/**
+ * The id the engine knows this device by while it is hosting.
+ *
+ * NOT the clientId. The clientId is the seat ticket (js/util.js) and is passed
+ * to addPlayer() as a separate argument so that it stays on this device and in
+ * this device's own memory. Using it as the player id would put the one value a
+ * seat is bound to into publicState(), which publishes player ids — so every
+ * device at the table would be handed everyone else's ticket, and seat reclaim
+ * would be a formality anybody could perform on anybody.
+ *
+ * A constant is enough for a host: there is exactly one of them per table.
+ * Everybody else is known by their connection id, prefixed.
+ */
+export const HOST_ID = 'host';
+
+// js/state.js addBot() mints `bot:<random>`. Kept here as a string rather than
+// imported, because importing the engine into the transport to check a naming
+// convention would be a dependency bought for an assertion.
+const BOT_ID_PREFIX = 'bot:';
+
+if (HOST_ID.startsWith(CONN_ID_PREFIX) || BOT_ID_PREFIX.startsWith(CONN_ID_PREFIX)) {
+  throw new Error('net.js: a local id is inside the peer namespace — impersonation is possible');
+}
+if (CONN_ID_PREFIX.startsWith(BOT_ID_PREFIX) || HOST_ID.startsWith(BOT_ID_PREFIX)) {
+  throw new Error('net.js: the peer namespace overlaps the bot namespace');
+}
+if (validPlayerId(HOST_ID) === null) {
+  throw new Error('net.js: HOST_ID would be refused by guards.js validPlayerId');
+}
+
+export function playerIdForConn(connId) {
+  return CONN_ID_PREFIX + connId;
+}
+
+/** The connection behind a player id, or null if that player is not a peer —
+ *  the host itself, or a bot. Callers use the null to mean "there is nothing to
+ *  send to", which is exactly right for both. */
+export function connIdForPlayer(playerId) {
+  return typeof playerId === 'string' && playerId.startsWith(CONN_ID_PREFIX)
+    ? playerId.slice(CONN_ID_PREFIX.length)
+    : null;
+}
+
+// ---------------------------------------------------------------------------
+// The wire vocabulary.
+//
+// js/intents.js handles the messages that CHANGE THE GAME and says, in its
+// header, that joining, state sync and refusals stay with the transport because
+// the engine has no opinion about them. These are those, and they live here as
+// builder/reader pairs for one reason: a frame that is written in one file and
+// read in another is two opinions about a format, and they drift. The pair
+// cannot.
+//
+// Four types is the whole protocol on top of the intents. Anything else that
+// arrives is handed to the caller's onData, where applyGameIntent() gets a look
+// at it and an unrecognised type is a no-op — which is what lets a newer client
+// talk to an older host without either of them crashing.
+//
+// ---------------------------------------------------------------------------
+// WHY THE FOURTH ONE EXISTS, WHEN THREE WAS THE POINT
+// ---------------------------------------------------------------------------
+// It was three, and the fourth is not a convenience. A seat is claimed by
+// clientId, and a clientId is per-DEVICE, not per-tab: two tabs of the same
+// browser read the same localStorage and therefore dial with the same ticket.
+// The second one reclaims the seat and the host retires the first one's channel,
+// which is correct and is the whole reconnect story — a phone that comes back
+// out of a tunnel is exactly this.
+//
+// What is NOT correct is what the first tab then does. A closed channel is
+// indistinguishable from a channel that died, so it redials; redialling wins the
+// seat back; and the tab that just took it gets retired in turn. Two tabs will
+// do that to each other until one of them is closed, and neither shows anything
+// but a spinner while it happens.
+//
+// The host cannot tell the two cases apart — a dying phone and a second tab look
+// identical from here, and any test that tried (timing, user agent, how recently
+// the seat spoke) would guess wrong on somebody's train. So this frame does not
+// try. It carries no decision, only a fact the OLD connection cannot observe for
+// itself: you were not dropped, you were superseded. What to do about that is
+// the client's business, and js/main.js's answer is to stop redialling and say
+// so.
+//
+// It is best-effort by construction. It is sent immediately before the channel
+// is closed, so a real DataChannel can lose it in flight; when that happens the
+// behaviour degrades to exactly what it was before this frame existed, which is
+// why the guard is here and not the only thing standing between two tabs and a
+// loop.
+// ---------------------------------------------------------------------------
+export const WIRE = Object.freeze({
+  JOIN: 'join',          // client -> host, once per connection, on open
+  STATE: 'state',        // host -> client, on every change
+  REJECTED: 'rejected',  // host -> client, a refusal meant for the sender alone
+  REPLACED: 'replaced',  // host -> client, last words: your seat moved elsewhere
+});
+
+/** A refusal is one sentence for a human, so it is capped at one sentence's
+ *  worth. decodePeerFrame() already stops a 64 KiB frame; this stops a 60 KiB
+ *  string being poured into the flash banner by a host that is not the table
+ *  the player meant to join. */
+export const MAX_REJECT_LEN = 200;
+
+/** The client's hello. The clientId is what gets THIS DEVICE — and only this
+ *  device — its seat and its cards back mid-game. */
+export function joinFrame(name, clientId) {
+  return { type: WIRE.JOIN, name, clientId };
+}
+
+/**
+ * Read a hello, or null if it is not one / is unusable.
+ *
+ * NOTE THE ASYMMETRY between the two fields, which is deliberate:
+ *
+ *   A BAD NAME REFUSES THE FRAME. The engine's addPlayer() would refuse it too
+ *   — cleanName('') is empty and it returns 'Pick a name first.' — but refusing
+ *   here means the sender is told by the transport rather than being seated and
+ *   then unseated. Somebody who left the field blank should be told so.
+ *
+ *   A BAD clientId IS DROPPED TO NULL AND THE JOIN PROCEEDS. It costs the
+ *   sender its claim on the seat if the connection ever drops, which is the
+ *   sender's problem; refusing it would mean a phone with storage switched off
+ *   cannot play at all. addPlayer() takes null and simply seats them fresh.
+ *
+ * The character classes are guards.js's, not this file's. What lives here is
+ * the shape of the frame; what a name or a clientId is allowed to contain is
+ * one answer for the whole app and it is written down over there.
+ */
+export function readJoinFrame(msg) {
+  if (!msg || msg.type !== WIRE.JOIN) return null;
+  const name = validName(msg.name);
+  if (name === null) return null;
+  return { name, clientId: validClientId(msg.clientId) };
+}
+
+/**
+ * One device's state frame.
+ *
+ * THIS IS WHERE THE GAME IS KEPT HONEST, and it is four lines long. `pub` is
+ * the table as everyone may see it — counts, claims, the log, and the cards of
+ * a challenge that has already been turned over. `priv` is one hand, fetched by
+ * asking privateFor() for the id of the peer this frame is addressed to, and
+ * sent to nobody else.
+ *
+ * Exported, and pure, for exactly that reason: "never send a player another
+ * player's cards" is the rule the whole game rests on, and a rule that
+ * important should be executable rather than reviewed. The harness sweeps whole
+ * games through this function and asserts that the hand in the frame is the
+ * hand of the connection it is addressed to, every time.
+ *
+ * `priv` is null for a connection with no seat yet — a device mid-join, or one
+ * whose seat has gone. privateStateFor() already returns null there; the `||
+ * null` only makes sure `undefined` never goes on the wire, because
+ * JSON.stringify drops an undefined value and the field would silently vanish
+ * from the frame, turning "you have no hand" into "the hand key is missing",
+ * which the reader below would then have to guess about.
+ */
+export function stateFrameFor(connId, pub, privateFor) {
+  const priv = privateFor(playerIdForConn(connId));
+  return { type: WIRE.STATE, pub, priv: priv || null };
+}
+
+/**
+ * The other side of it: what a CLIENT will accept as a state frame.
+ *
+ * Easy to forget, because "the host" sounds trustworthy. It is not,
+ * necessarily. A room code is four characters on a public broker, so a code
+ * typed one character wrong resolves to whoever else holds that id — and
+ * render() in js/ui.js does no checking at all, because on the host's own
+ * device the state always exists. See the note above validPublicState() in
+ * js/guards.js for exactly how that fails, which in this app is a dead tab
+ * showing the last frame that worked rather than an empty one.
+ *
+ * Returns { pub, priv } or null. A null `priv` is legitimate and distinct from
+ * a malformed one: a device that has connected but is not seated yet has no
+ * private state, so the two cases are separated before validPrivateState() is
+ * asked anything.
+ */
+export function readStateFrame(msg) {
+  if (!msg || msg.type !== WIRE.STATE) return null;
+  const pub = validPublicState(msg.pub);
+  if (pub === null) return null;
+  if (msg.priv === null || msg.priv === undefined) return { pub, priv: null };
+  const priv = validPrivateState(msg.priv);
+  if (priv === null) return null;
+  return { pub, priv };
+}
+
+/** A refusal for one sender. "You do not hold those cards" is not news to the
+ *  rest of the table — and in this game it is information they are specifically
+ *  not entitled to — so this is never broadcast. */
+export function rejectFrame(message) {
+  const text = typeof message === 'string' ? message : '';
+  return { type: WIRE.REJECTED, message: text.slice(0, MAX_REJECT_LEN) };
+}
+
+/**
+ * Read a refusal, or null if it is not one.
+ *
+ * A rejection whose message is missing or malformed still returns a SENTENCE,
+ * never an empty string. A flash banner with nothing in it is the worst of the
+ * three possible outcomes: worse than a vague message, and worse than no
+ * banner, because it tells the player something went wrong and then refuses to
+ * say what. The generic wording is here rather than in the UI because it is a
+ * fact about the frame — the host said no and said nothing else.
+ */
+export function readRejectFrame(msg) {
+  if (!msg || msg.type !== WIRE.REJECTED) return null;
+  const text = typeof msg.message === 'string' ? msg.message.slice(0, MAX_REJECT_LEN).trim() : '';
+  return text || 'The host refused that.';
+}
+
+/**
+ * Last words to a connection whose seat has just been reclaimed by another one
+ * holding the same ticket. See the long note above WIRE for why this is a frame
+ * and not a heuristic.
+ *
+ * IT CARRIES NOTHING, and the empty payload is the design rather than an
+ * omission. The seat, the name, the new peer's id — all of it is either already
+ * in the last state frame this connection received or is none of its business
+ * now, and every field added here is a field the reader below has to be
+ * suspicious of. The fact IS the frame.
+ */
+export function replacedFrame() {
+  return { type: WIRE.REPLACED };
+}
+
+/**
+ * A predicate, not a read-into-an-object, because there is nothing to read. The
+ * pair still exists for the reason the others do: the type string is written in
+ * one file and matched in another, and one of them gets renamed.
+ *
+ * NO NEW AUTHORITY IS GRANTED BY BELIEVING THIS. The host on the other end of a
+ * mistyped room code could send it unprompted — and could equally just close the
+ * channel, which is strictly worse for the player and needs no frame at all. So
+ * there is nothing here worth authenticating.
+ */
+export function isReplacedFrame(msg) {
+  return !!msg && msg.type === WIRE.REPLACED;
+}
+
+// ---------------------------------------------------------------------------
+// Is PeerJS actually here?
+//
+// window.Peer comes from a CDN <script> tag in index.html, and that tag is the
+// one thing in this app that can be missing while everything else works: an
+// offline first load, a blocked CDN, a content blocker, a corporate proxy. The
+// failure without this check is `window.Peer is not a constructor` thrown out of
+// a click handler, which on a phone is a button that does nothing at all.
+// ---------------------------------------------------------------------------
+export function peerAvailable() {
+  return typeof window !== 'undefined' && typeof window.Peer === 'function';
+}
+
+/** Shaped like PeerJS errors so they travel the caller's existing error path,
+ *  with types of our own so describePeerError() can say something more useful
+ *  than "unknown error". */
+const PEER_MISSING = { type: 'peer-missing', message: 'PeerJS did not load.' };
+const BAD_CODE = { type: 'bad-code', message: 'That is not a room code.' };
+
+function newPeer(id) {
+  const opts = BROKER_CONFIG ? { ...BROKER_CONFIG } : {};
+  return id ? new window.Peer(id, opts) : new window.Peer(opts);
+}
+
+/**
+ * A transport that does nothing, for when there is nothing to build one on.
+ *
+ * Reports the failure ASYNCHRONOUSLY, one turn later, so the caller has already
+ * returned from createHost()/joinHost() and assigned the handle before its own
+ * onError runs. A synchronous callback here would fire into a half-assigned
+ * `net`, which is a much worse bug than the one being reported.
+ */
+function inertTransport(handlers, err) {
+  setTimeout(() => { if (handlers.onError) handlers.onError(err); }, 0);
+  // The union of BOTH real handles, on purpose, and THE SAME union whichever
+  // one was asked for. A caller holding an inert transport does not know
+  // which it asked for — createHost() and joinHost() fail identically — and a
+  // missing member here is a TypeError thrown from a click handler on the one
+  // device where the transport was already broken. Note `connections`: it is
+  // the only non-function on a real host, and leaving it off here would make
+  // `net.connections.size` in a debug line the thing that crashes the page.
+  // The suite asserts the parity rather than trusting this comment.
+  return {
+    peer: null,
+    connections: new Map(),
+    send() {}, sendTo() {}, broadcast() {}, pushState() {}, dropConnection() {},
+    playerIds() { return []; },
+    isOpen() { return false; },
+    refusedFrames() { return 0; },
+    badFrames() { return 0; },
+    destroy() {},
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Which peer errors are worth giving up over.
+//
+// The useful distinction is not PeerJS's own notion of fatality, it is whether
+// there is still a game. Signalling failures leave existing DataConnections
+// untouched, because those run directly between devices — so a host whose
+// broker falls over keeps playing and only loses the ability to admit NEW
+// players. That is a banner, not an ending. Only a problem with the peer
+// identity itself, a code that is not a code, or a browser that cannot do
+// WebRTC at all, is genuinely unrecoverable.
+// ---------------------------------------------------------------------------
+const UNRECOVERABLE = new Set([
+  'browser-incompatible',
+  'invalid-id',
+  'invalid-key',
+  'unavailable-id',
+  'ssl-unavailable',
+  'peer-missing',
+  'bad-code',
+]);
+
+export function isFatalPeerError(err) {
+  return UNRECOVERABLE.has(err && err.type);
+}
+
+// ---------------------------------------------------------------------------
+// Broker socket recovery.
+//
+// When the socket to the signalling broker drops, PeerJS emits 'disconnected'
+// and then does nothing: the event is a notification, not a recovery.
+// reconnect() has to be called by hand, and until it is the peer can neither
+// accept nor make new connections — permanently. So one Wi-Fi blip would
+// otherwise lock the eighth player out of a game that is running perfectly
+// well, and would stop a disconnected player from ever reclaiming their hand.
+//
+// reconnect() reuses the SAME peer id, which is what keeps the room code valid
+// across the blip. Backoff doubles from a second and caps at eight, so five
+// tries span roughly half a minute, and giving up only tells the host that no
+// NEW connections can arrive.
+// ---------------------------------------------------------------------------
+const BROKER_RETRIES = 5;
+
+function attachBrokerRecovery(peer, handlers = {}) {
+  let tries = 0;
+  let timer = null;
+
+  const retry = () => {
+    if (timer || peer.destroyed) return;
+    if (tries >= BROKER_RETRIES) {
+      if (handlers.onBrokerLost) handlers.onBrokerLost();
+      return;
+    }
+    const delay = Math.min(1000 * 2 ** tries, 8000);
+    tries += 1;
+    timer = setTimeout(() => {
+      timer = null;
+      // Both checks matter: destroyed means we left the game while waiting, and
+      // !disconnected means the socket came back on its own in the meantime.
+      if (peer.destroyed || !peer.disconnected) return;
+      try { peer.reconnect(); } catch (_) { retry(); }
+    }, delay);
+  };
+
+  // Fires on the first connect AND on every successful reconnect, which is what
+  // resets the ladder for the next blip.
+  peer.on('open', () => {
+    tries = 0;
+    if (handlers.onBrokerUp) handlers.onBrokerUp();
+  });
+
+  peer.on('disconnected', () => {
+    if (peer.destroyed) return;
+    if (handlers.onBrokerDown) handlers.onBrokerDown();
+    retry();
+  });
+
+  return { cancel() { if (timer) { clearTimeout(timer); timer = null; } } };
+}
+
+// ---------------------------------------------------------------------------
+// HOST side
+// ---------------------------------------------------------------------------
+
+/**
+ * Listen on the address derived from `code`.
+ *
+ * handlers: onOpen(code), onConnect(playerId),
+ *           onJoin(playerId, { name, clientId } | null),
+ *           onData(playerId, msg), onDisconnect(playerId), onError(err),
+ *           onBrokerDown(), onBrokerUp(), onBrokerLost()
+ *
+ * EVERY ID HANDED TO A HANDLER IS ALREADY A PLAYER ID — prefixed, per the
+ * security note above — so a caller cannot forget to do it. The connection id
+ * is an internal detail of this module and of the `connections` map.
+ *
+ * onJoin and onData are split so that the caller's message handler never has to
+ * know the transport's vocabulary. A JOIN frame is consumed here and never
+ * reaches onData; everything else reaches onData and never reaches onJoin. The
+ * `null` case of onJoin is a hello that arrived and was unusable — the caller
+ * should tell the sender why, because a joiner who is dropped in silence sits on
+ * a spinner until their own deadline expires.
+ */
+export function createHost(code, handlers = {}) {
+  if (!peerAvailable()) return inertTransport(handlers, PEER_MISSING);
+
+  const peerId = peerIdForCode(code);
+  if (peerId === null) return inertTransport(handlers, BAD_CODE);
+
+  const room = codeFromPeerId(peerId);
+  const peer = newPeer(peerId);
+  const connections = new Map();  // connId -> DataConnection, open and usable
+  const attached = new Set();     // every conn accepted, open or still opening
+  const recovery = attachBrokerRecovery(peer, handlers);
+  let refusedTotal = 0;
+
+  // The code handed back is the NORMALISED one, because that is the address
+  // actually being listened on. A host that typed nothing and was given a code
+  // by generateRoomCode() sees it unchanged; a host resuming a session from
+  // storage sees whatever that stored string cleans up to, and so shows the
+  // table the code it is really reachable at.
+  peer.on('open', () => { if (handlers.onOpen) handlers.onOpen(room); });
+
+  peer.on('connection', (conn) => {
+    // MAX_CONNECTIONS lives in js/guards.js with the other bounds; the note
+    // there explains why it is 24 and not 8. Counted over connections ACCEPTED
+    // rather than connections that finished opening, or a flood of half-open
+    // ones would never be counted at all.
+    if (attached.size >= MAX_CONNECTIONS) {
+      try { conn.close(); } catch (_) {}
+      return;
+    }
+
+    // A peer chooses its own id, so its length is its choice too. Anything that
+    // would not survive validPlayerId() is refused before it can be written into
+    // a seat, a log line or a snapshot.
+    if (validPlayerId(playerIdForConn(conn.peer)) === null) {
+      try { conn.close(); } catch (_) {}
+      return;
+    }
+
+    attached.add(conn);
+
+    // One bucket per connection, so a flood costs the flooder its own budget and
+    // nobody else's. In front of the dispatch, not behind it: every accepted
+    // message fans out into a push to the whole table, so at eight seats a
+    // message admitted here is multiplied by seven before it leaves this phone.
+    const bucket = new TokenBucket();
+    let refused = 0;
+
+    // ONE CONNECTION IS ONE IDENTITY. Null until this connection has said hello;
+    // after that, the clientId it said hello with.
+    //
+    // A connection may repeat its hello — that is a retry and costs nothing —
+    // but it may not change it, and the reason is a real denial of service
+    // rather than tidiness. The engine reclaims by clientId, so a connection
+    // that says hello twice with two different tickets ends up as the `id` on
+    // two seats; seatOf() is a findIndex and only ever finds the first, so the
+    // second seat is marked online, is nobody's, cannot be played, and cannot be
+    // waited out. The table then hangs on its turn, and in this game there is no
+    // trick to time out — a claim sits unanswered forever. Holding a connection
+    // to the first ticket it presented costs a legitimate client nothing: a
+    // device that wants a different identity opens a new connection, which is
+    // what a reconnecting device does anyway.
+    let joinedAs = null;
+    let joined = false;
+
+    // See HANDSHAKE_BUDGET_MS. Cleared the moment the connection opens, so a
+    // live connection is never touched by it.
+    let reaper = setTimeout(() => {
+      reaper = null;
+      // BY THIS CONNECTION, NOT BY THIS PEER. The two are only the same while a
+      // peer has one connection at a time, and the case this whole file is built
+      // around is the one where it does not: a phone that loses signal does not
+      // close its channel politely, so it comes back on a SECOND connection
+      // while the first is still open and still in the map. If that second
+      // connection then stalls in ICE, a `connections.has(conn.peer)` test would
+      // ask "is anything from this peer connected?", get yes, and return —
+      // leaving a connection that never opened in `attached` forever. `attached`
+      // is what MAX_CONNECTIONS counts, so each stalled reconnect would burn a
+      // slot permanently, and enough of them makes the table nobody can join the
+      // host's own.
+      //
+      // Only the 'open' handler writes to `connections`, and it calls
+      // stopReaper() first, so today this can never be true and the guard is
+      // belt and braces. It is kept, and kept correct, because "the reaper
+      // cannot fire on a live connection" is an invariant held by a different
+      // function.
+      if (connections.get(conn.peer) === conn) return;
+      attached.delete(conn);
+      // close(), NOT drop(). drop() fires onDisconnect, and a connection that
+      // never opened was never seated — announcing its departure would mark a
+      // seat away that is being played by somebody else's live channel.
+      try { conn.close(); } catch (_) {}
+    }, HANDSHAKE_BUDGET_MS);
+
+    const stopReaper = () => { if (reaper) { clearTimeout(reaper); reaper = null; } };
+
+    const refuse = () => {
+      refusedTotal += 1;
+      if (++refused > MAX_REFUSED_FRAMES) { try { conn.close(); } catch (_) {} }
+    };
+
+    conn.on('open', () => {
+      stopReaper();
+      // The same remote peer can open a second DataConnection without closing
+      // the first. Overwriting the map entry would leak the old one — still
+      // open, still counted, never closed — so it is retired explicitly.
+      const previous = connections.get(conn.peer);
+      if (previous && previous !== conn) { try { previous.close(); } catch (_) {} }
+      connections.set(conn.peer, conn);
+      if (handlers.onConnect) handlers.onConnect(playerIdForConn(conn.peer));
+    });
+
+    conn.on('data', (raw) => {
+      const msg = decodePeerFrame(raw);
+      // Junk is dropped in silence. Answering it would tell a prober that
+      // somebody is listening, and cost a send for every frame they can
+      // generate.
+      if (!msg) { refuse(); return; }
+      if (!bucket.take()) {
+        // A burst is normal rather than suspicious: the host nudging the decks
+        // stepper sends one message per tap, and at the close of a challenge
+        // window several devices genuinely fire at the same instant. A client
+        // still going after the bucket is empty is not playing.
+        refuse();
+        return;
+      }
+
+      if (msg.type === WIRE.JOIN) {
+        const hello = readJoinFrame(msg);
+        // A hello with no usable name never reaches the engine, but the caller
+        // is told, so the sender can be told.
+        if (!hello) { if (handlers.onJoin) handlers.onJoin(playerIdForConn(conn.peer), null); return; }
+        if (joined && hello.clientId !== joinedAs) { refuse(); return; }
+        joined = true;
+        joinedAs = hello.clientId;
+        if (handlers.onJoin) handlers.onJoin(playerIdForConn(conn.peer), hello);
+        return;
+      }
+
+      if (handlers.onData) handlers.onData(playerIdForConn(conn.peer), msg);
+    });
+
+    const drop = () => {
+      stopReaper();
+      attached.delete(conn);
+      // Only if THIS connection is the one currently seated. A stale connection
+      // closing after a reconnect has already taken the seat must not fire a
+      // disconnect against the seat that was just handed back.
+      if (connections.get(conn.peer) === conn) {
+        connections.delete(conn.peer);
+        if (handlers.onDisconnect) handlers.onDisconnect(playerIdForConn(conn.peer));
+      }
+    };
+    conn.on('close', drop);
+    conn.on('error', drop);
+  });
+
+  peer.on('error', (err) => { if (handlers.onError) handlers.onError(err); });
+
+  return {
+    peer,
+    connections,
+
+    /** Player ids of everyone currently connected. NOT seats — a connection can
+     *  exist before addPlayer() has run, and a seat outlives its connection for
+     *  the whole of a mid-game disconnect, which is the entire point of reclaim.
+     *  Anything that wants to know who is AT the table asks the engine. */
+    playerIds() {
+      return [...connections.keys()].map(playerIdForConn);
+    },
+
+    /** True when the broker socket is up, which is to say when a NEW player
+     *  could still arrive. Existing connections are unaffected by this being
+     *  false — they run device to device. */
+    isOpen() { return !!peer.open; },
+
+    /** Frames dropped across every connection, ever: junk, floods, and second
+     *  identities. Not shown to anybody; it exists so the suite can prove the
+     *  caps bite rather than assuming they do. */
+    refusedFrames() { return refusedTotal; },
+
+    sendTo(playerId, msg) {
+      const connId = connIdForPlayer(playerId);
+      if (connId === null) return;   // the host itself, or a bot: nothing to send to
+      const conn = connections.get(connId);
+      if (conn && conn.open) trySend(conn, msg);
+    },
+
+    broadcast(msg) {
+      for (const conn of connections.values()) {
+        if (conn.open) trySend(conn, msg);
+      }
+    },
+
+    /**
+     * Push the table to every connected device: everything public, plus exactly
+     * one private slice per device — theirs.
+     *
+     * THE PRIVACY MODEL OF THE ENTIRE GAME IS THIS LOOP. It asks privateFor()
+     * for the id of the peer it is about to send to, and sends the answer to
+     * nobody else. Note what is NOT available here: there is no way to address a
+     * frame to one connection carrying another connection's hand, because the
+     * id is derived from the map key rather than passed in. See stateFrameFor()
+     * above, which is the part of it the harness holds to account.
+     *
+     * `pub` is built once by the caller and serialised once per connection. At
+     * eight seats that is seven stringifies of a few kilobytes on a change,
+     * which is nothing next to the WebRTC send itself; splicing a pre-serialised
+     * public half into seven frames would save it and would make every frame in
+     * this file a string concatenation instead of an object. Not worth it, and
+     * written down so the thought does not have to be had twice.
+     */
+    pushState(pub, privateFor) {
+      for (const [connId, conn] of connections) {
+        if (!conn.open) continue;
+        trySend(conn, stateFrameFor(connId, pub, privateFor));
+      }
+    },
+
+    /** Forget and close one connection WITHOUT firing onDisconnect — it is
+     *  removed from the map first, so the conn's own close handler sees that it
+     *  is no longer the seated connection and short-circuits. Used when a
+     *  reconnecting device takes over a seat held by a connection that has not
+     *  noticed it is dead yet. */
+    dropConnection(playerId) {
+      const connId = connIdForPlayer(playerId);
+      if (connId === null) return;
+      const conn = connections.get(connId);
+      connections.delete(connId);
+      if (conn) { try { conn.close(); } catch (_) {} }
+    },
+
+    destroy() { recovery.cancel(); try { peer.destroy(); } catch (_) {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CLIENT side
+// ---------------------------------------------------------------------------
+
+/**
+ * Dial the host at the address derived from `code`.
+ *
+ * handlers: onOpen(), onState(pub, priv), onReplaced(), onData(msg), onClose(),
+ *           onError(err), onBrokerDown(), onBrokerUp(), onBrokerLost()
+ *
+ * onReplaced() is immediately followed by onClose(), always — the host sends the
+ * frame and then closes the channel. A caller that acts on the first must
+ * therefore make the second inert, because the close by itself is
+ * indistinguishable from a dropped connection and "reconnect" is the right
+ * answer to that one.
+ *
+ * `identity` is { name, clientId }. When it is given — which is every real call
+ * — the JOIN frame is sent by this function, on open, before onOpen fires, and
+ * exactly once per connection. That is not a convenience: it is what makes "the
+ * ticket travels" a property of the transport rather than of whoever remembered
+ * to write the line. Pass nothing to open a connection that says nothing, which
+ * only a probe wants.
+ *
+ * NO TIMEOUT IN HERE, on purpose. A host that cannot be reached over WebRTC
+ * produces no error at all (see the header), so somebody has to impose a
+ * deadline — but what a missed deadline MEANS depends on whether there was a
+ * game yet, and only the controller knows that. A first join that times out is
+ * an error screen; a reconnect that times out keeps the table on screen and
+ * tries again.
+ *
+ * NOTHING LISTENS FOR INCOMING CONNECTIONS HERE. `peer.on('connection')` is
+ * deliberately not wired, so the random broker-assigned id this peer registers
+ * under answers nobody. Worth stating because publicState() publishes player
+ * ids, so every device at the table learns everybody else's 'peer:<id>' — and
+ * the honest answer to "is that an address somebody could dial" is yes, and it
+ * goes nowhere.
+ */
+export function joinHost(code, handlers = {}, identity = null) {
+  if (!peerAvailable()) return inertTransport(handlers, PEER_MISSING);
+
+  const hostId = peerIdForCode(code);
+  if (hostId === null) return inertTransport(handlers, BAD_CODE);
+
+  const peer = newPeer(null);
+  const recovery = attachBrokerRecovery(peer, handlers);
+  let conn = null;
+  let bad = 0;
+
+  peer.on('open', () => {
+    // 'open' fires again after every broker reconnect. Dialling a second time
+    // would leave the host holding two connections for one player, so the first
+    // dial wins and a later reconnect is treated as the no-op it is for us: the
+    // DataConnection runs device to device and stopped needing the broker the
+    // moment the handshake finished.
+    if (conn) return;
+    conn = peer.connect(hostId, { reliable: true });
+
+    conn.on('open', () => {
+      if (identity) trySend(conn, joinFrame(identity.name, identity.clientId));
+      if (handlers.onOpen) handlers.onOpen();
+    });
+
+    conn.on('data', (raw) => {
+      // Bounded on the way in even though this is "our" host. The code was typed
+      // by a human and resolves to whoever holds that id on a public broker, so
+      // the thing on the other end is not necessarily the table we meant to
+      // join, and a client that trusts its host is one bad code away from
+      // parsing a stranger's payload.
+      const msg = decodePeerFrame(raw);
+      if (!msg) { bad += 1; return; }
+
+      // State is the only frame this file understands well enough to check, and
+      // it is also the only one render() walks without looking. A malformed one
+      // is dropped rather than passed on, because passing it on means the
+      // renderer finds out.
+      if (msg.type === WIRE.STATE) {
+        const frame = readStateFrame(msg);
+        if (!frame) { bad += 1; return; }
+        if (handlers.onState) handlers.onState(frame.pub, frame.priv);
+        return;
+      }
+
+      // Intercepted here rather than left to onData for the same reason STATE
+      // is: this one has consequences for the transport itself. The close that
+      // follows it must not be read as a dropped connection, and a caller that
+      // only ever sees onData has no way to get in front of that — by the time
+      // applyGameIntent() has shrugged at an unknown type, onClose has already
+      // fired and the redial is already scheduled.
+      if (isReplacedFrame(msg)) {
+        if (handlers.onReplaced) handlers.onReplaced();
+        return;
+      }
+
+      if (handlers.onData) handlers.onData(msg);
+    });
+
+    conn.on('close', () => { if (handlers.onClose) handlers.onClose(); });
+    conn.on('error', (err) => { if (handlers.onError) handlers.onError(err); });
+  });
+
+  // A peer-level error before the connection opens almost always means the room
+  // code is wrong ('peer-unavailable') or the broker is unreachable.
+  peer.on('error', (err) => { if (handlers.onError) handlers.onError(err); });
+
+  return {
+    peer,
+    send(msg) { if (conn && conn.open) trySend(conn, msg); },
+    isOpen() { return !!(conn && conn.open); },
+
+    /** Frames from the host that were junk or the wrong shape. A table that is
+     *  producing these is either not this game or not well; nothing acts on it
+     *  yet, and the suite asserts against it. */
+    badFrames() { return bad; },
+
+    destroy() { recovery.cancel(); try { peer.destroy(); } catch (_) {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Wire helper. JSON text in both directions — see the note on decodePeerFrame in
+// js/guards.js for why the receiving side still has to cope with an object.
+//
+// The try/catch is not decoration. `conn.send` on a DataChannel that closed
+// between the `conn.open` check and this line throws InvalidStateError, and that
+// happens for real: the check and the send are two statements and a phone can
+// leave the building between them.
+// ---------------------------------------------------------------------------
+function trySend(conn, msg) {
+  try { conn.send(JSON.stringify(msg)); } catch (_) { /* torn down mid-send */ }
+}
+
+// ---------------------------------------------------------------------------
+// The common PeerJS failures, in words a player can act on.
+//
+// Every one of these is read aloud off a phone by somebody who wants to be
+// playing cards, so each says what to DO. "Network error" says nothing; "check
+// the code, and that the host still has the tab open" is two things to try.
+//
+// EVERY TYPE IN `UNRECOVERABLE` HAS A CASE HERE, and that is not a coincidence
+// to be maintained by hand — the harness derives the fatal set by asking
+// isFatalPeerError, and fails if any member of it reaches the default branch. A
+// player who has hit a dead end is the one who most needs to be told WHICH dead
+// end; "Connection problem: unknown error." is the sentence that tells them
+// nothing at the moment it matters most.
+// ---------------------------------------------------------------------------
+export function describePeerError(err) {
+  switch (err && err.type) {
+    case 'peer-unavailable':
+      return 'No table found with that code. Check the four characters, and that the host still has the game open.';
+    case 'bad-code':
+      return 'That is not a room code. Check the four characters — letters and numbers, with no O, zero, I or one.';
+    case 'unavailable-id':
+      return 'That room code is already in use. Go back and host again for a new one.';
+    case 'peer-missing':
+      return 'The connection library did not load. This first load needs the internet — check your signal, then reload.';
+    case 'network':
+    case 'server-error':
+    case 'socket-error':
+    case 'socket-closed':
+      return 'Could not reach the connection server. Check your internet or Wi-Fi and try again.';
+    case 'browser-incompatible':
+      return 'This browser cannot do the WebRTC calls the game needs. Try Chrome, Firefox or Safari, or update the one you have.';
+    case 'invalid-id':
+      return 'The connection server refused that room code. Go back and host again for a new one.';
+    case 'invalid-key':
+      return 'The connection service turned this app away. That is a fault at our end, not yours — please try again later.';
+    case 'ssl-unavailable':
+      return 'The connection server could not be reached securely. Check that the address starts with https, then reload.';
+    case 'webrtc':
+      return 'The direct connection failed. A guest or corporate Wi-Fi network often blocks this — try mobile data.';
+    default: {
+      // This branch concatenates a string THIS MODULE DID NOT WRITE: it came
+      // from a third-party library, over a network, in an object nobody
+      // validated. Two things go wrong and both end up on a player's screen.
+      //
+      // A `message` that is not a string can have a getter or a toString that
+      // throws — and this function is called FROM an error handler, so a throw
+      // here replaces a banner the player could act on with a dead tab. And a
+      // message thousands of characters long is not a banner at all. Capped at
+      // MAX_REJECT_LEN for the same reason a refusal is: this is one line of
+      // text under a heading, not a document.
+      let detail = 'unknown error';
+      try {
+        const raw = err && err.message;
+        if (typeof raw === 'string' && raw.trim() !== '') detail = raw.trim();
+      } catch (_) { /* hostile getter — the default says enough */ }
+      if (detail.length > MAX_REJECT_LEN) detail = `${detail.slice(0, MAX_REJECT_LEN - 1)}…`;
+      return `Connection problem: ${detail}.`;
+    }
+  }
+}

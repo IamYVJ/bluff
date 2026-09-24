@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bluff</title>
+<meta name="description" content="Bluff — Cheat, I Doubt It — played on the phones already at the table. No accounts, no server, no install.">
+<meta name="color-scheme" content="dark">
+
+<!--
+  Matches --bg in css/styles.css. Colours the browser chrome on Android and the
+  status bar area of an installed PWA, so the app does not sit in a white
+  frame. If --bg changes, change this and manifest.webmanifest's two colours
+  too; there is no way to derive one from the other without script.
+-->
+<meta name="theme-color" content="#07130E">
+
+<!--
+  EVERY PATH IN THIS FILE IS RELATIVE ("./x"), never root-relative ("/x").
+  GitHub Pages serves a project site from /<repo>/, so "/css/styles.css" would
+  resolve to the user site root and 404. Relative paths work there, at a
+  domain root, and from a file:// double-click — and the service worker's
+  scope is picked up from the same rule.
+-->
+<link rel="manifest" href="./manifest.webmanifest">
+
+<!--
+  Two sizes rather than one, because a browser picks the nearest and then
+  scales: handing it only the 192 leaves it shrinking a tilted card down to a
+  16px tab favicon, which turns the edges to mush. icon-32.png is a DIFFERENT
+  DRAWING rather than a downscale — one card instead of two, because at that
+  size the pair averages into a pale blob. See scripts/gen-icons.js.
+-->
+<link rel="icon" href="./icons/icon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
+
+<!--
+  iOS ignores the manifest's icons for "Add to Home Screen" and reads this
+  instead. It also applies its own rounded mask and composites over nothing,
+  so the file must be opaque to the edge — it is; every icon paints the
+  background gradient across the whole tile.
+-->
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+
+<!--
+  Three families, loaded exactly as sequence loads them, and deliberately NOT
+  precached by sw.js: fonts are the one thing here that degrades gracefully on
+  its own, because every --font token in the stylesheet names a real system
+  fallback behind it. Offline you get Georgia and system-ui and the layout is
+  unchanged. `display=swap` so text paints immediately in the fallback rather
+  than hanging invisible while a third party is slow.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&family=Playfair+Display:wght@700;900&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="./css/styles.css">
+
+<!--
+  THE ONLY THIRD-PARTY CODE IN THIS PROJECT, AND THE ONLY REASON package.json
+  HAS NO `dependencies` KEY.
+
+  PeerJS is the WebRTC signalling and DataConnection layer. It is loaded as a
+  UMD bundle from a CDN rather than installed, so there is no build step, no
+  node_modules, and nothing to keep in sync — js/net.js reads it off
+  `window.Peer` and nowhere else, which is what makes peerAvailable() a real
+  question with a real answer rather than an import that either resolves or
+  explodes at parse time.
+
+  PINNED TO AN EXACT VERSION on purpose. `peerjs@1` would let a patch release
+  change the behaviour of a game that has already shipped, on a page the player
+  reloaded, with no way to tell what changed. Both sibling repos pin the same
+  way and to the same version.
+
+  `defer`, and BEFORE the module below. Deferred classic scripts and module
+  scripts share one queue and run in document order, so window.Peer exists by
+  the time js/main.js evaluates. A module tag cannot be used here: the bundle
+  is UMD and assigns a global, which an ES module does not do.
+
+  IT IS ALSO THE ONE THING THAT NEEDS THE NETWORK ON A COLD START, AND sw.js
+  DOES NOT CHANGE THAT. The worker precaches this origin only — a cached copy
+  of somebody else's bundle is a pinned version that a `git pull` can no
+  longer move, and the same write path would eventually cache a signalling
+  response, which is a room code that dials a conversation that ended
+  yesterday. So offline, this tag fails, peerAvailable() returns false, and
+  describePeerError() has a sentence ready for exactly that case. The
+  local-only game — one phone, bots, no transport — still works, which is the
+  reason that path was kept rather than deleted when the network arrived.
+
+  There is no integrity="sha384-…" here on purpose. An SRI hash that does not
+  match the bytes the CDN serves blocks the script silently and bricks all
+  multiplayer, and the hash cannot be verified from inside this repository.
+  peerAvailable() is the compensating control: it checks for window.Peer
+  before every use and routes a missing bundle into the same error screen as a
+  blocked CDN or an offline first load, rather than throwing "Peer is not a
+  constructor" out of a click handler.
+-->
+<script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+<!-- ==========================================================================
+     #app AND ITS ONE SIBLING
+
+     js/ui.js writes the whole screen and never reaches outside `root`, which
+     is this element. It builds its own shell on the first call — the skip
+     link, #screen, and the flash region — and every frame after that rewrites
+     #screen alone. So anything that must survive a frame cannot live inside
+     #screen, and anything that must survive js/main.js FAILING TO LOAD cannot
+     live inside #app at all. That second case is the footer, below.
+     ========================================================================== -->
+
+<!--
+  There is no server-rendered markup to hydrate and no framework to mount, so
+  an empty root is honest about where the screen comes from.
+
+  THE NOSCRIPT IS INSIDE IT, which is not where it started. It was a sibling,
+  and as a sibling it does not work: #app is `flex: 1 1 auto` in the column
+  below, so with scripting off it would be an empty box taking the whole
+  viewport and pushing the explanation off the bottom of a page that cannot
+  scroll. Inside, the empty box is not empty — it holds the one thing worth
+  saying — and ui.js's first write discards it, which is exactly the right
+  lifetime: the moment there is script, the message about there being none is
+  wrong.
+
+  It is not a courtesy either. The whole game is JavaScript, and a blank dark
+  page with no explanation is the worst possible answer to a browser with it
+  switched off.
+-->
+<div id="app" class="app" role="application" aria-label="Bluff">
+  <noscript>
+    <div class="noscript">
+      <h1>Bluff</h1>
+      <p>This game is entirely JavaScript running on your own phone — there is no
+         server to render it for you. Switch JavaScript on and reload.</p>
+    </div>
+  </noscript>
+</div>
+
+<!--
+  THE FOOTER — a sibling of #app, and outside everything ui.js touches.
+
+  It is hidden outright once there is a table on screen: .app.in-play in
+  css/styles.css, from a class render() sets. The lobby and the play screen
+  both fill a capped column with a scroller inside it, and a strip of chrome
+  underneath would take the height from the hand rather than from the page.
+  Which means this is visible on the home screen, on the joining screen, and —
+  the case it is really for — on a page where nothing rendered at all.
+-->
+<footer class="site-footer">
+  <span>Bluff</span>
+  <span class="sep">&middot;</span>
+  <span>Peer-to-peer. No server, no accounts.</span>
+
+  <!--
+    THE ESCAPE HATCH. Its handler is at the bottom of this file in a plain
+    inline script, not in js/main.js, and that is deliberate: this is the
+    button you press BECAUSE the app is broken. A stale service worker
+    serving a half-updated shell is exactly the failure it exists for, and in
+    that state ./js/main.js may be the thing that failed to load. A recovery
+    control that depends on the thing it recovers from is not a recovery
+    control.
+  -->
+  <button type="button" class="footer-reset" id="reset-btn">Clear cache &amp; reload</button>
+</footer>
+
+<script type="module" src="./js/main.js"></script>
+
+<!-- ==========================================================================
+     THE SHELL SCRIPT
+
+     A plain classic script, not a module, and not part of js/. Everything in
+     here is about the PAGE rather than the GAME, and all of it has to work on
+     the occasions when the game does not load at all — which is why it is
+     neither imported by nor importing anything.
+     ========================================================================== -->
+<script>
+(function () {
+  'use strict';
+
+  // -- Service worker ------------------------------------------------------
+  // Registered from here rather than from js/main.js so that an offline
+  // second visit still gets a cached shell even if the module graph is
+  // broken.
+  //
+  // './sw.js' is relative, which also sets the SCOPE to this directory — the
+  // correct scope under a GitHub Pages project subpath, where a root-scoped
+  // worker would be rejected outright. The worker has to be served from here
+  // for the same reason; see the header of sw.js.
+  //
+  // Skipped on file:// because service workers are not available there and
+  // the rejection is a noisy console error rather than a useful one.
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    window.addEventListener('load', function () {
+      // Failure is genuinely fine: no worker means no offline support, and
+      // the app works exactly as well as it did before there was one.
+      // Swallowing this is not hiding a bug, it is declining to turn a
+      // missing nicety into a console error on every load.
+      navigator.serviceWorker.register('./sw.js').catch(function () {});
+    });
+  }
+
+  // -- Clear cache & reload ------------------------------------------------
+  var btn = document.getElementById('reset-btn');
+  if (!btn) return;
+
+  btn.addEventListener('click', function () {
+    // ###################################################################
+    //
+    //  THIS BUTTON MUST NEVER TOUCH localStorage.
+    //
+    //  It is tempting to make it a "reset everything", and that would be
+    //  destructive in a way nothing here can undo. localStorage holds two
+    //  things that are not derived from anything:
+    //
+    //    bluff.clientId — the 128-bit ticket that IS a player's claim to
+    //      their seat. Clearing it mid-game does not sign you out and let
+    //      you back in; it makes you a stranger to the host, so the rejoin
+    //      is refused and the hand you were holding is gone.
+    //
+    //    bluff.engine — on the host's device, the ONLY copy of the game.
+    //      Every hand at the table is in there. Clearing it ends everyone
+    //      else's game too, from a button labelled "clear cache".
+    //
+    //  So: Cache Storage and service worker registrations ONLY. Those are
+    //  derived data — every byte in them can be fetched again — which is
+    //  exactly what makes them safe to throw away and makes the stale shell
+    //  they can cause worth a button. It is also why this is safe to press
+    //  mid-game: the two stores are separate, and sw.js never writes to the
+    //  one that matters.
+    //
+    // ###################################################################
+    btn.disabled = true;
+    btn.textContent = 'Clearing…';
+
+    var jobs = [];
+
+    if ('serviceWorker' in navigator) {
+      jobs.push(
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          return Promise.all(regs.map(function (r) { return r.unregister(); }));
+        })
+      );
+    }
+
+    if ('caches' in window) {
+      jobs.push(
+        caches.keys().then(function (keys) {
+          return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+        })
+      );
+    }
+
+    // Reload either way. If the clearing failed, the reload is still the most
+    // useful thing that can happen next, and leaving the button stuck on
+    // "Clearing…" would be the worst of both.
+    Promise.all(jobs)
+      .catch(function () {})
+      .then(function () { location.reload(); });
+  });
+}());
+</script>
+
+</body>
+</html>
