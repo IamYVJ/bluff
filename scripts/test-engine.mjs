@@ -3757,6 +3757,13 @@ section('The shell: the worker, driven');
   }
   eq(intercepted, 0, 'not one cross-origin request is intercepted — the beacon is never touched');
 
+  // The analytics beacon must never be cached: a beacon answered from cache records nothing.
+  // The origin check covers GoatCounter without naming it, and naming it is
+  // the first step to routing or precaching it. Comments stripped first — the
+  // header is allowed to talk about the beacon.
+  ok(!/gc\.zgo\.at|goatcounter/.test(swSrc.replace(/\/\/[^\n]*/g, '')),
+    'the analytics beacon is not routed or precached by the worker');
+
   // And nothing cross-origin ended up in the cache as a side effect.
   let foreignCached = 0;
   for (const k of await cache.keys()) if (!k.startsWith(ORIGIN)) foreignCached++;

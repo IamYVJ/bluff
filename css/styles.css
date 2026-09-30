@@ -207,6 +207,19 @@ button { font: inherit; color: inherit; }
 .footer-reset:hover, .footer-reset:focus-visible { color: var(--text); }
 .footer-reset:disabled { opacity: 0.55; cursor: default; }
 
+/* The visitor footnote. Everything but the number is inherited from the
+   footer — the mono, the 9.5px, the tracking, the capitals, the muted ink —
+   so it reads as one more line of the same fine print. `margin: 0` because a
+   <p> brings 1em above and below, which in this row would push the strip
+   taller only on the visits where the count arrives.
+
+   NO `display` ON .visitor-counter. Any value beats the browser's own
+   `[hidden] { display: none }` and would show a bare "— visitors" to anyone
+   whose adblocker stops GoatCounter. The footer being a flex row is fine: a
+   flex container does not un-hide a hidden child. */
+.visitor-counter { margin: 0; }
+.visitor-count { font-variant-numeric: tabular-nums; color: var(--text); }
+
 /* HIDDEN ONCE THERE IS A TABLE, and hidden by a class rather than by a media
    query, because the condition is "a game is on screen" and not "the screen
    is small". The lobby and the play screen both fill the capped column and

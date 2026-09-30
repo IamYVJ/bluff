@@ -81,7 +81,7 @@
 // worker does not precache itself, which is also the only reason this can be
 // computed at all — and the only reason `npm run stamp` can write to this file
 // without moving the target it just measured.
-const SHELL_STAMP = '749274a0a961';
+const SHELL_STAMP = 'dfe45ac3c090';
 
 // Keeping the 'bluff-shell-' prefix matters: the activate handler deletes
 // caches by it, and deleting by prefix is what stops this worker from throwing

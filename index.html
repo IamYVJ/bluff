@@ -57,8 +57,10 @@
 <link rel="stylesheet" href="./css/styles.css">
 
 <!--
-  THE ONLY THIRD-PARTY CODE IN THIS PROJECT, AND THE ONLY REASON package.json
-  HAS NO `dependencies` KEY.
+  THE ONLY THIRD-PARTY CODE THE GAME RUNS ON, AND THE ONLY REASON package.json
+  HAS NO `dependencies` KEY. (The GoatCounter beacon at the end of <body> is
+  third-party too, but nothing depends on it: blocked or missing, the game
+  cannot tell the difference.)
 
   PeerJS is the WebRTC signalling and DataConnection layer. It is loaded as a
   UMD bundle from a CDN rather than installed, so there is no build step, no
@@ -153,6 +155,17 @@
   <span>Peer-to-peer. No server, no accounts.</span>
 
   <!--
+    THE VISITOR FOOTNOTE. Decoration, so it starts `hidden` and only the shell
+    script at the bottom of this file removes that, once a real number has
+    come back. An adblocker, a first load offline or a path with no data yet
+    leaves nothing here — not a bare "— visitors". In the footer for the same
+    reason as the button: ui.js rewrites everything inside #app.
+  -->
+  <p class="visitor-counter" hidden>
+    <span id="visitor-count" class="visitor-count">—</span> visitors
+  </p>
+
+  <!--
     THE ESCAPE HATCH. Its handler is at the bottom of this file in a plain
     inline script, not in js/main.js, and that is deliberate: this is the
     button you press BECAUSE the app is broken. A stale service worker
@@ -198,6 +211,63 @@
       // missing nicety into a console error on every load.
       navigator.serviceWorker.register('./sw.js').catch(function () {});
     });
+  }
+
+  // -- Visitor count -------------------------------------------------------
+  // The footer's "N visitors" footnote. Decorative: stays hidden on every
+  // failure — adblocker, offline, a brand-new path with no data yet, or the
+  // "visitor counts" setting off on GoatCounter's side.
+  //
+  // Here and not in js/ because the footnote is part of the page, not the
+  // game, and has to work when the module graph does not. Placed ABOVE the
+  // reset button's section, because that one returns early.
+  function showVisitorCount() {
+    var box = document.querySelector('.visitor-counter');
+    var out = document.getElementById('visitor-count');
+    if (!box || !out) return;
+
+    // Read the endpoint off the beacon tag so the site URL lives in one place.
+    var tag = document.querySelector('script[data-goatcounter]');
+    var endpoint = tag && tag.getAttribute('data-goatcounter');
+    if (!endpoint) return;
+
+    // This page's path only. Never /counter/TOTAL.json, which sums every
+    // project on the shared site. pathname WITHOUT location.search, on
+    // purpose: a visit that arrived with ?fbclid=… is recorded under the
+    // longer path, and asking for that exact path would 404 for exactly those
+    // visitors. Live rather than pinned, because nothing here ever changes
+    // the pathname — a room code is typed, never routed.
+    var path = window.location.pathname;
+
+    // A fixed date before this project's first pageview. All-time is the
+    // default, so this does not change the count; it gives the response its
+    // own cache key, which sidesteps a 404 GoatCounter cached for up to ~4h
+    // before any data existed. Never a rolling period like 'week'.
+    var START = '2026-01-01';
+
+    var base = endpoint.replace(/\/count$/, '');
+    fetch(base + '/counter/' + encodeURIComponent(path) + '.json?start=' + START)
+      .then(function (res) {
+        return res.ok ? res.json() : Promise.reject(new Error('bad status'));
+      })
+      .then(function (data) {
+        // `count` is already a formatted string: render it as-is.
+        // GoatCounter caches this response for ~4h, so a fresh visit won't move it immediately.
+        if (data && data.count != null) {
+          out.textContent = String(data.count);
+          box.hidden = false;
+        }
+      })
+      .catch(function () { /* decorative: stay hidden */ });
+  }
+
+  // WAITS FOR THE PARSER. This script runs the moment it is parsed, and the
+  // beacon tag the endpoint is read from comes after it — without this, the
+  // lookup above finds nothing and the footnote silently never appears.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', showVisitorCount, { once: true });
+  } else {
+    showVisitorCount();
   }
 
   // -- Clear cache & reload ------------------------------------------------
@@ -260,6 +330,25 @@
   });
 }());
 </script>
+
+<!--
+  GoatCounter pageview beacon. One site shared across all projects on purpose:
+  counts are per-path, so each project is separated by its own pathname.
+
+  LAST IN <body> and `async`, so it never stands between a player and the
+  game. Never cached either: it is cross-origin, and sw.js hands every
+  cross-origin request to the network untouched. A beacon answered from cache
+  records nothing; an offline load simply goes uncounted.
+
+  `https:` spelled out rather than the protocol-relative "//gc.zgo.at", for
+  the file:// double-click this page supports: there, "//host/x" resolves to
+  file://gc.zgo.at/count.js — a network-share path on Windows — instead of
+  failing plainly.
+-->
+<script
+  data-goatcounter="https://yvj.goatcounter.com/count"
+  async
+  src="https://gc.zgo.at/count.js"></script>
 
 </body>
 </html>
